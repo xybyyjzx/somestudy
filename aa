@@ -1,0 +1,6 @@
+SELECT 
+    EXTRACT(DOY FROM current_date) AS doy,
+    EXTRACT(DOW FROM DATE_TRUNC('year', current_date)) AS jan1_weekday,
+    (7 - EXTRACT(DOW FROM DATE_TRUNC('year', current_date))) % 7 AS adjust,
+    (EXTRACT(DOY FROM current_date) - 1 + 
+     (7 - EXTRACT(DOW FROM DATE_TRUNC('year', current_date))) % 7) / 7 + 1 AS week_number;
