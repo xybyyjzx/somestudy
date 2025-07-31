@@ -1,0 +1,379 @@
+{
+  "name": "task-sse-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pinia": "^2.1.7",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}
+
+export default {
+  server: {
+    port: 5173,
+    open: true
+  }
+}
+
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>任务系统 - SSE 实时通知</title>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
+
+
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+
+const app = createApp(App)
+const pinia = createPinia()
+
+app.use(pinia)
+app.mount('#app')
+
+
+
+<template>
+  <div class="app">
+    <h1>📝 报告生成系统（SSE 实时通知）</h1>
+    <p>前端实例 ID: {{ clientId }}</p>
+    <TaskSubmit />
+    <TaskPanel />
+  </div>
+</template>
+
+<script setup>
+import { onMounted, onUnmounted } from 'vue'
+import TaskSubmit from './components/TaskSubmit.vue'
+import TaskPanel from './components/TaskPanel.vue'
+import { SseService } from './utils/sse'
+
+const clientId = localStorage.getItem('frontendInstanceId')
+
+let sseService
+
+onMounted(() => {
+  sseService = new SseService(clientId)
+})
+
+onUnmounted(() => {
+  if (sseService) {
+    sseService.disconnect()
+  }
+})
+</script>
+
+<style>
+* { box-sizing: border-box; }
+body { font-family: Arial, sans-serif; padding: 20px; }
+.app { max-width: 800px; margin: 0 auto; }
+</style>
+
+import { defineStore } from 'pinia'
+
+export const useTaskStore = defineStore('task', {
+  state: () => ({
+    tasks: [],
+    sseConnected: false
+  }),
+  actions: {
+    addTask(taskId) {
+      this.tasks.unshift({
+        taskId,
+        status: 'pending',
+        progress: 0,
+        message: '等待提交...',
+        submittedAt: new Date()
+      })
+    },
+    updateTask(taskId, data) {
+      const task = this.tasks.find(t => t.taskId === taskId)
+      if (task) {
+        Object.assign(task, data)
+      } else {
+        this.tasks.unshift({ taskId, ...data, submittedAt: new Date() })
+      }
+    },
+    clearCompleted() {
+      this.tasks = this.tasks.filter(t => t.status !== 'completed' && t.status !== 'failed')
+    }
+  },
+  getters: {
+    runningTasks: state => state.tasks.filter(t => ['queued', 'processing'].includes(t.status)),
+    completedTasks: state => state.tasks.filter(t => t.status === 'completed'),
+    failedTasks: state => state.tasks.filter(t => t.status === 'failed')
+  }
+})
+
+import { useTaskStore } from '@/stores/taskStore'
+
+export class SseService {
+  constructor(clientId) {
+    this.clientId = clientId
+    this.eventSource = null
+    this.store = useTaskStore()
+    this.connect()
+  }
+
+  connect() {
+    const url = `http://localhost:8080/api/sse/connect?clientId=${this.clientId}`
+    this.eventSource = new EventSource(url)
+
+    this.eventSource.onopen = () => {
+      console.log('✅ SSE 连接成功')
+      this.store.sseConnected = true
+    }
+
+    this.eventSource.onerror = (err) => {
+      console.error('❌ SSE 连接错误', err)
+      this.store.sseConnected = false
+    }
+
+    this.eventSource.addEventListener('task-updated', (e) => {
+      const data = JSON.parse(e.data)
+      this.store.updateTask(data.taskId, {
+        status: data.status,
+        progress: data.progress || 0,
+        message: data.message,
+        result: data.result
+      })
+
+      if (data.status === 'completed') {
+        this.showNotification(`✅ 任务 ${data.taskId} 已完成！`, 'success')
+      } else if (data.status === 'failed') {
+        this.showNotification(`❌ 任务 ${data.taskId} 失败：${data.message}`, 'error')
+      }
+    })
+  }
+
+  disconnect() {
+    if (this.eventSource) {
+      this.eventSource.close()
+    }
+  }
+
+  showNotification(message, type = 'info') {
+    console[type === 'error' ? 'error' : 'log'](`🔔 ${message}`)
+    alert(message)
+  }
+}
+
+
+<template>
+  <div class="task-submit">
+    <button @click="submitTask" :disabled="loading">
+      {{ loading ? '提交中...' : '生成报告' }}
+    </button>
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { useTaskStore } from '@/stores/taskStore'
+
+const store = useTaskStore()
+const loading = ref(false)
+
+const clientId = localStorage.getItem('frontendInstanceId') || 
+  `user_123-${Date.now()}-${Math.random().toString(36).substr(2,6)}`
+localStorage.setItem('frontendInstanceId', clientId)
+
+const submitTask = () => {
+  const taskId = 'report_' + Date.now()
+  loading.value = true
+
+  store.addTask(taskId)
+
+  fetch(`http://localhost:8080/api/sse/tasks?taskId=${taskId}&clientId=${clientId}`, {
+    method: 'POST'
+  })
+    .then(res => res.json())
+    .then(data => {
+      store.updateTask(taskId, { message: data.message, status: 'queued' })
+    })
+    .catch(err => {
+      store.updateTask(taskId, { status: 'failed', message: '网络错误' })
+    })
+    .finally(() => {
+      loading.value = false
+    })
+}
+</script>
+
+<style scoped>
+button {
+  padding: 10px 20px;
+  background: #1890ff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+</style>
+
+
+
+<template>
+  <div class="task-panel">
+    <h3>任务中心 🔔</h3>
+    <p v-if="store.tasks.length === 0">暂无任务</p>
+
+    <div v-for="task in store.tasks" :key="task.taskId" class="task-item">
+      <div class="task-header">
+        <strong>{{ task.taskId }}</strong>
+        <span :class="`status ${task.status}`">{{ statusText(task.status) }}</span>
+      </div>
+      <div class="task-progress" v-if="task.progress !== undefined">
+        <div class="bar" :style="{ width: task.progress + '%' }"></div>
+      </div>
+      <div class="task-message">{{ task.message }}</div>
+      <div class="task-result" v-if="task.result?.downloadUrl">
+        <a :href="task.result.downloadUrl" target="_blank">📄 下载结果</a>
+      </div>
+    </div>
+
+    <button @click="store.clearCompleted" v-if="store.completedTasks.length > 0">
+      清除已完成
+    </button>
+  </div>
+</template>
+
+<script setup>
+import { useTaskStore } from '@/stores/taskStore'
+
+const store = useTaskStore()
+
+const statusText = (status) => {
+  return {
+    pending: '待提交',
+    queued: '排队中',
+    processing: '处理中',
+    completed: '已完成',
+    failed: '失败'
+  }[status] || status
+}
+</script>
+
+<style scoped>
+.task-panel {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 10px;
+  max-width: 400px;
+  font-size: 14px;
+}
+
+.task-item {
+  margin: 10px 0;
+  padding: 8px;
+  background: #f9f9f9;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.task-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.status {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.status.queued { background: #ffe58f; }
+.status.processing { background: #91d5ff; }
+.status.completed { background: #b7eb8f; }
+.status.failed { background: #ffccc7; }
+
+.task-progress {
+  height: 6px;
+  background: #eee;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.task-progress .bar {
+  height: 100%;
+  background: #1890ff;
+  transition: width 0.3s;
+}
+
+.task-message {
+  margin: 4px 0;
+  color: #666;
+}
+
+.task-result a {
+  color: #1890ff;
+  text-decoration: underline;
+}
+</style>
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+            root /usr/share/nginx/html;
+            try_files $uri $uri/ /index.html;
+        }
+
+        location /api/sse/ {
+            proxy_buffering off;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_read_timeout 3650s;
+            proxy_send_timeout 3650s;
+            proxy_pass http://localhost:8080/api/sse/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /api/ {
+            proxy_buffering on;
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_pass http://localhost:8080/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
