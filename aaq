@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Method Call Graph</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.0/dist/echarts.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/highlight.min.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #f8f9fa; }
+    .header { text-align: center; margin-bottom: 20px; }
+    .controls { display: flex; justify-content: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
+    input, button { padding: 6px 12px; font-size: 14px; }
+    #chart { width: 100%; height: 700px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    #modal {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.6); z-index: 2000;
+    }
+    #modal-content {
+      background: white; margin: 30px auto; padding: 20px; width: 80%; max-width: 900px;
+      max-height: 85vh; overflow: auto; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    #close-btn { float: right; cursor: pointer; font-size: 28px; font-weight: bold; color: #aaa; }
+    #close-btn:hover { color: #333; }
+    h3 { margin-top: 0; color: #1a5fb4; }
+    pre { white-space: pre-wrap; tab-size: 4; }
+    .call-order { margin-top: 15px; padding-top: 12px; border-top: 1px solid #eee; }
+    .call-order h4 { margin: 10px 0; color: #d73a49; }
+    code { font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h2>🔍 Java Method Call Graph Analyzer</h2>
+  <div class="controls">
+    <div>
+      <label>Version:</label>
+      <input type="text" id="versionInput" value="default" placeholder="e.g., v1.0, commit-id">
+      <button onclick="loadGraph()">Load Graph</button>
+    </div>
+    <div>
+      <button onclick="showComparePanel()">Compare Versions</button>
+    </div>
+  </div>
+</div>
+
+<div id="chart"></div>
+
+<!-- 源码查看模态框 -->
+<div id="modal">
+  <div id="modal-content">
+    <span id="close-btn">&times;</span>
+    <h3 id="modal-title">Method Source</h3>
+    <pre><code class="language-java" id="source-code">// Loading...</code></pre>
+    <div class="call-order">
+      <h4>Static Call Order:</h4>
+      <div id="call-order-list">Loading call order...</div>
+    </div>
+  </div>
+</div>
+
+<!-- 版本对比面板（简单入口） -->
+<script>
+let currentVersion = 'default';
+const chart = echarts.init(document.getElementById('chart'));
+
+// 关闭模态框
+document.getElementById('close-btn').onclick = () => {
+  document.getElementById('modal').style.display = 'none';
+};
+
+// 加载指定版本的调用图
+function loadGraph() {
+  currentVersion = document.getElementById('versionInput').value || 'default';
+  fetch(`/api/graph?version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.json())
+    .then(data => {
+      const option = {
+        title: { text: `Call Graph - Version: ${currentVersion}`, left: 'center' },
+        tooltip: { show: true },
+        series: [{
+          type: 'graph',
+          layout: 'force',
+          force: { repulsion: 1200, edgeLength: 250, gravity: 0.1 },
+          draggable: true,
+          roam: true,
+          label: {
+            show: true,
+            position: 'right',
+            formatter: (params) => {
+              const fullName = params.name;
+              // 简化显示：只显示 类名.方法名(参数类型)
+              const match = fullName.match(/^(.*\.)*([^.]*)\.(.*)\((.*)\)$/);
+              if (match) {
+                const className = match[2] || 'Unknown';
+                const methodName = match[3] || 'method';
+                const params = match[4] || '';
+                return `${className}.${methodName}(${params})`;
+              }
+              return fullName;
+            },
+            color: '#333'
+          },
+          edgeSymbol: ['none', 'arrow'],
+          edgeSymbolSize: [4, 8],
+          lineStyle: { color: '#aaa' },
+          emphasis: { focus: 'adjacency' },
+          data: data.nodes,
+          links: data.edges
+        }]
+      };
+      chart.setOption(option, true);
+    })
+    .catch(err => {
+      alert('Failed to load graph: ' + err.message);
+    });
+
+  // 绑定点击事件
+  chart.off('click');
+  chart.on('click', (params) => {
+    if (params.dataType === 'node') {
+      const signature = params.name;
+      showMethodDetails(signature);
+    }
+  });
+}
+
+// 显示方法详情（源码 + 调用顺序）
+function showMethodDetails(signature) {
+  document.getElementById('modal-title').innerText = signature;
+  const codeEl = document.getElementById('source-code');
+  const orderEl = document.getElementById('call-order-list');
+  
+  // 加载源码
+  fetch(`/api/graph/source?signature=${encodeURIComponent(signature)}&version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.text())
+    .then(code => {
+      codeEl.textContent = code || '// Source code not available';
+      hljs.highlightElement(codeEl);
+    })
+    .catch(() => {
+      codeEl.textContent = '// Failed to load source';
+      hljs.highlightElement(codeEl);
+    });
+
+  // 加载调用顺序
+  fetch(`/api/graph/order?signature=${encodeURIComponent(signature)}&version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.json())
+    .then(order => {
+      if (order && order.length > 0) {
+        const html = order.map((m, i) => 
+          `<div>${i + 1}. <code>${m}</code></div>`
+        ).join('');
+        orderEl.innerHTML = html;
+      } else {
+        orderEl.innerHTML = '<em>No method calls found</em>';
+      }
+    })
+    .catch(() => {
+      orderEl.innerHTML = '<em>Failed to load call order</em>';
+    });
+
+  document.getElementById('modal').style.display = 'block';
+}
+
+// 显示版本对比入口（简单跳转）
+function showComparePanel() {
+  const base = prompt('Enter BASE version:');
+  const target = prompt('Enter TARGET version:');
+  if (base && target) {
+    const url = `/api/graph/compare?baseVersion=${encodeURIComponent(base)}&targetVersion=${encodeURIComponent(target)}`;
+    window.open(url, '_blank');
+    // 实际项目中可在此处渲染对比报告
+  }
+}
+
+// 初始加载
+loadGraph();
+</script>
+
+</body>
+</html>
