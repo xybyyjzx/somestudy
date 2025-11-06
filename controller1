@@ -1,0 +1,124 @@
+package com.example.mindmap.service;
+
+import com.example.mindmap.entity.MethodInfo;
+import com.example.mindmap.entity.MethodCallEdge;
+import com.example.mindmap.repository.MethodInfoRepository;
+import com.example.mindmap.repository.MethodCallEdgeRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import spoon.Launcher;
+import spoon.reflect.declaration.CtMethod;
+import spoon.reflect.declaration.CtType;
+import spoon.reflect.code.CtInvocation;
+import spoon.reflect.reference.CtExecutableReference;
+import spoon.reflect.visitor.CtScanner;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+@Transactional
+public class CallGraphAnalyzer {
+
+    private final MethodInfoRepository methodInfoRepo;
+    private final MethodCallEdgeRepository callEdgeRepo;
+
+    public CallGraphAnalyzer(MethodInfoRepository methodInfoRepo, MethodCallEdgeRepository callEdgeRepo) {
+        this.methodInfoRepo = methodInfoRepo;
+        this.callEdgeRepo = callEdgeRepo;
+    }
+
+    public void analyzeAndSave(String version, String sourceRoot) {
+        Launcher launcher = new Launcher();
+        launcher.addInputResource(sourceRoot);
+        launcher.getEnvironment().setAutoImports(true);
+        launcher.buildModel();
+
+        Map<String, CtMethod<?>> allMethods = new HashMap<>();
+        Map<String, Set<String>> callGraph = new HashMap<>();
+
+        launcher.getModel().getAllTypes().forEach(type ->
+            type.getMethods().forEach(method -> {
+                String sig = getFullMethodSignature(method);
+                allMethods.put(sig, method);
+
+                // 收集调用顺序
+                Map<Integer, String> callByLine = new TreeMap<>();
+                method.accept(new CtScanner() {
+                    @Override
+                    public <T> void visitCtInvocation(CtInvocation<T> inv) {
+                        CtExecutableReference<?> ref = inv.getExecutable();
+                        if (ref == null || ref.getDeclaringType() == null) return;
+                        String callee = getFullMethodSignatureFromRef(ref);
+                        if (inv.getPosition() != null) {
+                            callByLine.put(inv.getPosition().getLine(), callee);
+                        } else {
+                            callByLine.put(Integer.MAX_VALUE, callee);
+                        }
+                    }
+                });
+
+                // 保存调用边
+                callByLine.values().forEach(callee -> {
+                    callGraph.computeIfAbsent(sig, k -> new HashSet<>()).add(callee);
+                    MethodCallEdge edge = new MethodCallEdge();
+                    edge.setCallerSignature(sig);
+                    edge.setCalleeSignature(callee);
+                    edge.setVersion(version);
+                    callEdgeRepo.save(edge);
+                });
+
+                // 保存方法信息
+                MethodInfo info = new MethodInfo();
+                info.setFullSignature(sig);
+                info.setVersion(version);
+                info.setClassName(getFullClassName(method.getDeclaringType()));
+                info.setMethodName(method.getSimpleName());
+                info.setParameterTypes(
+                    method.getParameters().stream()
+                        .map(p -> p.getType().toString())
+                        .collect(Collectors.joining(","))
+                );
+                info.setSourceCode(method.toString());
+                info.setStaticCallOrder("[" + callByLine.values().stream()
+                    .map(s -> "\"" + s + "\"")
+                    .collect(Collectors.joining(",")) + "]");
+                methodInfoRepo.save(info);
+            })
+        );
+    }
+
+    private String getFullClassName(CtType<?> type) {
+        if (type == null) return "Unknown";
+        String pkg = type.getPackage() != null ? type.getPackage().getSimpleName() : "";
+        String simple = type.getSimpleName();
+        return pkg.isEmpty() ? simple : pkg + "." + simple;
+    }
+
+    private String getFullMethodSignature(CtMethod<?> method) {
+        String className = getFullClassName(method.getDeclaringType());
+        String methodName = method.getSimpleName();
+        String params = method.getParameters().stream()
+            .map(p -> {
+                String t = p.getType().toString();
+                if (t.startsWith("java.lang.")) return t.substring(10);
+                if (t.startsWith("java.util.")) return t.substring(10);
+                return t;
+            })
+            .collect(Collectors.joining(","));
+        return className + "." + methodName + "(" + params + ")";
+    }
+
+    private String getFullMethodSignatureFromRef(CtExecutableReference<?> ref) {
+        String className = ref.getDeclaringType().getQualifiedName();
+        String methodName = ref.getSimpleName();
+        String params = ref.getParameters().stream()
+            .map(p -> {
+                String t = p.toString();
+                if (t.startsWith("java.lang.")) return t.substring(10);
+                if (t.startsWith("java.util.")) return t.substring(10);
+                return t;
+            })
+            .collect(Collectors.joining(","));
+        return className + "." + methodName + "(" + params + ")";
+    }
+}
