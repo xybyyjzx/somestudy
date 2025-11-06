@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>代码调用链 - Circular 有向图 (扩展版)</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        body { margin: 0; padding: 20px; background: #f5f5f5; }
+        #main { width: 800px; height: 600px; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <h2>方法调用链可视化（Circular 布局，B → E/F 扩展）</h2>
+    <p>节点标签：方法名 + 源码首行。Hover 查看完整源码。</p>
+    <div id="main"></div>
+    <script type="text/javascript">
+        var myChart = echarts.init(document.getElementById('main'));
+        var option = {
+            title: { text: '调用链示例 (B 扩展到 E/F)', left: 'center' },
+            tooltip: {
+                formatter: function (params) {
+                    if (params.data && params.data.source) {
+                        return `
+                            <strong>${params.name}</strong><br/>
+                            <pre style="font-size:12px; margin:0;">${params.data.source}</pre>
+                        `;
+                    }
+                    return params.name;
+                }
+            },
+            series: [{
+                type: 'graph',
+                layout: 'circular',  // 圆形布局
+                circular: {
+                    rotateLabel: true  // 标签旋转，适合圆周
+                },
+                data: [  // 节点：新增 E 和 F
+                    { 
+                        name: '方法A (入口)\n入口点', 
+                        id: 'A', 
+                        source: 'def methodA():\n    # 处理用户输入\n    data = input()\n    methodB(data)\n    methodC(data)\n    return result',
+                        itemStyle: { color: '#91cc75' }  // 绿色入口
+                    },
+                    { 
+                        name: '方法B (处理数据)\ndata = process(input)', 
+                        id: 'B', 
+                        source: 'def methodB(data):\n    # 数据清洗\n    cleaned = data.strip()\n    sub_result = methodE(cleaned)  # 新增\n    valid = methodF(sub_result)    # 新增\n    result = methodD(cleaned)\n    return result'
+                    },
+                    { 
+                        name: '方法C (验证)\nvalidate(input)', 
+                        id: 'C', 
+                        source: 'def methodC(data):\n    # 校验逻辑\n    if not is_valid(data):\n        raise ValueError("Invalid data")\n    return True'
+                    },
+                    { 
+                        name: '方法D (输出)\noutput(result)', 
+                        id: 'D', 
+                        source: 'def methodD(cleaned):\n    # 输出到文件\n    with open("output.txt", "w") as f:\n        f.write(cleaned)\n    print("Done!")'
+                    },
+                    {  // 新增 E
+                        name: '方法E (子任务)\nsub_process(data)',
+                        id: 'E',
+                        source: 'def methodE(cleaned):\n    # 子任务：过滤噪声\n    filtered = [x for x in cleaned if len(x) > 5]\n    return filtered',
+                        itemStyle: { color: '#fabbb9' }  // 橙色子任务
+                    },
+                    {  // 新增 F
+                        name: '方法F (子验证)\nsub_validate(result)',
+                        id: 'F',
+                        source: 'def methodF(sub_result):\n    # 子验证：检查完整性\n    if len(sub_result) == 0:\n        return False\n    return all(is_clean(x) for x in sub_result)',
+                        itemStyle: { color: '#a78bfa' }  // 紫色验证
+                    }
+                ],
+                links: [  // 有向边：新增 B → E 和 B → F
+                    { source: 'A', target: 'B', name: '调用 (1次)', lineStyle: { width: 2 } },
+                    { source: 'A', target: 'C', name: '调用 (1次)', lineStyle: { width: 2 } },
+                    { source: 'B', target: 'D', name: '调用 (1次)', lineStyle: { width: 2 } },
+                    { source: 'B', target: 'E', name: '调用 (1次)', lineStyle: { width: 2 } },  // 新增
+                    { source: 'B', target: 'F', name: '调用 (1次)', lineStyle: { width: 2 } }   // 新增
+                ],
+                edgeSymbol: ['none', 'arrow'],  // 起点无箭头，终点箭头
+                edgeSymbolSize: [4, 10],
+                lineStyle: { color: 'source', opacity: 0.6 },
+                label: { 
+                    show: true, 
+                    fontSize: 10, 
+                    formatter: '{b}'  // 显示name
+                },
+                emphasis: {
+                    focus: 'adjacency',  // Hover 高亮相邻节点/边
+                    itemStyle: { opacity: 0.8 }
+                },
+                roam: true  // 支持缩放/拖拽
+            }]
+        };
+        myChart.setOption(option);
+    </script>
+</body>
+</html>
