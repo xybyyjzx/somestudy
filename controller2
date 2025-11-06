@@ -1,0 +1,121 @@
+package com.example.mindmap.controller;
+
+import com.example.mindmap.entity.MethodInfo;
+import com.example.mindmap.entity.MethodCallEdge;
+import com.example.mindmap.repository.MethodInfoRepository;
+import com.example.mindmap.repository.MethodCallEdgeRepository;
+import org.springframework.web.bind.annotation.*;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/graph")
+public class GraphController {
+
+    private final MethodInfoRepository methodInfoRepo;
+    private final MethodCallEdgeRepository callEdgeRepo;
+
+    public GraphController(MethodInfoRepository methodInfoRepo, MethodCallEdgeRepository callEdgeRepo) {
+        this.methodInfoRepo = methodInfoRepo;
+        this.callEdgeRepo = callEdgeRepo;
+    }
+
+    @GetMapping("/tree")
+    public Object getCallTree(@RequestParam(defaultValue = "default") String version) {
+        List<MethodInfo> entries = methodInfoRepo.findControllerMethods(version);
+        if (entries.isEmpty()) {
+            return Map.of("name", "No Controller Found", "children", Collections.emptyList());
+        }
+
+        Map<String, Set<String>> callGraph = callEdgeRepo.findByVersion(version).stream()
+            .collect(Collectors.groupingBy(
+                MethodCallEdge::getCallerSignature,
+                Collectors.mapping(MethodCallEdge::getCalleeSignature, Collectors.toSet())
+            ));
+
+        List<Map<String, Object>> rootChildren = new ArrayList<>();
+        for (MethodInfo entry : entries) {
+            Map<String, Object> node = buildTreeNode(
+                entry.getFullSignature(), callGraph, new HashSet<>(), 0, 4
+            );
+            if (node != null) rootChildren.add(node);
+        }
+
+        return Map.of("name", "Root", "children", rootChildren);
+    }
+
+    private Map<String, Object> buildTreeNode(
+        String signature,
+        Map<String, Set<String>> callGraph,
+        Set<String> visited,
+        int depth,
+        int maxDepth
+    ) {
+        if (depth > maxDepth || visited.contains(signature)) return null;
+        visited.add(signature);
+
+        String name = getReadableName(signature);
+        Map<String, Object> node = new HashMap<>();
+        node.put("name", name);
+        node.put("fullSignature", signature);
+
+        Set<String> callees = callGraph.get(signature);
+        if (callees != null && !callees.isEmpty()) {
+            List<Map<String, Object>> children = new ArrayList<>();
+            for (String callee : callees) {
+                Map<String, Object> child = buildTreeNode(
+                    callee, callGraph, new HashSet<>(visited), depth + 1, maxDepth
+                );
+                if (child != null) children.add(child);
+            }
+            if (!children.isEmpty()) {
+                node.put("children", children);
+            }
+        }
+        return node;
+    }
+
+    @GetMapping("/source")
+    public String getSource(@RequestParam String signature,
+                           @RequestParam(defaultValue = "default") String version) {
+        return methodInfoRepo.findByFullSignatureAndVersion(signature, version)
+            .map(MethodInfo::getSourceCode)
+            .orElse("// Method not found");
+    }
+
+    @GetMapping("/order")
+    public List<String> getCallOrder(@RequestParam String signature,
+                                    @RequestParam(defaultValue = "default") String version) {
+        return methodInfoRepo.findByFullSignatureAndVersion(signature, version)
+            .map(m -> {
+                try {
+                    String json = m.getStaticCallOrder();
+                    if (json.startsWith("[")) {
+                        json = json.substring(1, json.length() - 1);
+                        if (json.isEmpty()) return Collections.<String>emptyList();
+                        return Arrays.stream(json.split(","))
+                            .map(s -> s.trim().replaceAll("^\"|\"$", ""))
+                            .collect(Collectors.toList());
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                return Collections.<String>emptyList();
+            })
+            .orElse(Collections.emptyList());
+    }
+
+    private String getReadableName(String fullSig) {
+        if (fullSig == null) return "Unknown";
+        int lastDot = fullSig.lastIndexOf(".");
+        if (lastDot > 0) {
+            String methodPart = fullSig.substring(lastDot + 1);
+            int paren = methodPart.indexOf("(");
+            if (paren > 0) {
+                return methodPart.substring(0, paren);
+            }
+            return methodPart;
+        }
+        return fullSig;
+    }
+}
