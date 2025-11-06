@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Call Flow Mind Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.0/dist/echarts.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.8.0/build/highlight.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 15px; background: #f0f2f5; }
+    .header { text-align: center; margin-bottom: 15px; }
+    #chart { width: 100%; height: 750px; background: white; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.1); }
+    #modal {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.7); z-index: 2000;
+    }
+    #modal-content {
+      background: white; margin: 40px auto; padding: 20px; width: 70%; max-width: 800px;
+      max-height: 80vh; overflow: auto; border-radius: 10px;
+    }
+    #close-btn { float: right; cursor: pointer; font-size: 28px; color: #999; }
+    #close-btn:hover { color: #333; }
+    h3 { margin-top: 0; color: #1890ff; }
+    pre { white-space: pre-wrap; tab-size: 4; }
+    .call-order { margin-top: 15px; padding-top: 12px; border-top: 1px solid #eee; }
+    .call-order h4 { margin: 10px 0; color: #d9363e; }
+    code { font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h2>🧠 Java Method Call Mind Map</h2>
+  <div>
+    <input type="text" id="versionInput" value="default" placeholder="Version (e.g., v1.0)">
+    <button onclick="loadTree()">Load</button>
+    <button onclick="triggerAnalysis()">Analyze Project</button>
+  </div>
+</div>
+
+<div id="chart"></div>
+
+<div id="modal">
+  <div id="modal-content">
+    <span id="close-btn">&times;</span>
+    <h3 id="modal-title">Method Source</h3>
+    <pre><code class="language-java" id="source-code">// Loading...</code></pre>
+    <div class="call-order">
+      <h4>Static Call Order:</h4>
+      <div id="call-order-list">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentVersion = 'default';
+let chart = echarts.init(document.getElementById('chart'));
+
+document.getElementById('close-btn').onclick = () => {
+  document.getElementById('modal').style.display = 'none';
+};
+
+function loadTree() {
+  currentVersion = document.getElementById('versionInput').value || 'default';
+  fetch(`/api/graph/tree?version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.json())
+    .then(treeData => {
+      const option = {
+        tooltip: { trigger: 'item', triggerOn: 'mousemove' },
+        series: [{
+          type: 'tree',
+          orient: 'LR',
+          symbolSize: 50,
+          label: {
+            fontSize: 12,
+            color: '#333'
+          },
+          lineStyle: { width: 2 },
+          emphasis: { focus: 'descendant' },
+          expandAndCollapse: true,
+          initialTreeDepth: 2,
+          itemStyle: {
+            color: function(params) {
+              return params.depth === 0 ? '#ff7875' : 
+                     params.depth === 1 ? '#ffd666' : 
+                     params.depth === 2 ? '#73d13d' : '#40a9ff';
+            }
+          },
+           [treeData]
+        }]
+      };
+      chart.setOption(option, true);
+    })
+    .catch(err => console.error('Load error:', err));
+
+  chart.off('click');
+  chart.on('click', (params) => {
+    if (params.data && params.data.fullSignature) {
+      showMethodDetails(params.data.fullSignature);
+    }
+  });
+}
+
+function showMethodDetails(signature) {
+  document.getElementById('modal-title').innerText = signature;
+  const codeEl = document.getElementById('source-code');
+  const orderEl = document.getElementById('call-order-list');
+  
+  // Load source
+  fetch(`/api/graph/source?signature=${encodeURIComponent(signature)}&version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.text())
+    .then(code => {
+      codeEl.textContent = code || '// Not available';
+      hljs.highlightElement(codeEl);
+    });
+  
+  // Load call order
+  fetch(`/api/graph/order?signature=${encodeURIComponent(signature)}&version=${encodeURIComponent(currentVersion)}`)
+    .then(res => res.json())
+    .then(order => {
+      if (order && order.length > 0) {
+        orderEl.innerHTML = order.map((m, i) => 
+          `<div>${i + 1}. <code>${getReadableName(m)}</code></div>`
+        ).join('');
+      } else {
+        orderEl.innerHTML = '<em>No calls found</em>';
+      }
+    });
+  
+  document.getElementById('modal').style.display = 'block';
+}
+
+function getReadableName(fullSig) {
+  if (!fullSig) return 'Unknown';
+  const match = fullSig.match(/^[^)]*\)/);
+  return match ? match[0] : fullSig;
+}
+
+// Trigger analysis (example)
+function triggerAnalysis() {
+  const sourcePath = prompt("Enter source path (e.g., /your/project/src/main/java):");
+  if (sourcePath) {
+    fetch(`/api/analyze?version=${encodeURIComponent(currentVersion)}&sourcePath=${encodeURIComponent(sourcePath)}`, {
+      method: 'POST'
+    }).then(() => {
+      alert('Analysis started! Refresh after completion.');
+    });
+  }
+}
+
+// Initial load
+loadTree();
+</script>
+
+</body>
+</html>
