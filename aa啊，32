@@ -1,0 +1,160 @@
+@GetMapping("/tree")
+public Object getCallTree(@RequestParam(defaultValue = "default") String version) {
+    // 获取所有入口方法（Controller）
+    List<MethodInfo> entries = methodInfoRepo.findByVersion(version).stream()
+        .filter(m -> m.getFullSignature().toLowerCase().contains("controller"))
+        .collect(Collectors.toList());
+
+    if (entries.isEmpty()) {
+        return Map.of("name", "No Controller Found", "children", Collections.emptyList());
+    }
+
+    // 构建调用图
+    Map<String, Set<String>> callGraph = callEdgeRepo.findByVersion(version).stream()
+        .collect(Collectors.groupingBy(
+            MethodCallEdge::getCallerSignature,
+            Collectors.mapping(MethodCallEdge::getCalleeSignature, Collectors.toSet())
+        ));
+
+    // 构建签名 -> MethodInfo 映射
+    Map<String, MethodInfo> methodMap = methodInfoRepo.findByVersion(version).stream()
+        .collect(Collectors.toMap(MethodInfo::getFullSignature, m -> m));
+
+    // 递归构建树（限制深度避免循环）
+    List<Map<String, Object>> rootChildren = new ArrayList<>();
+    for (MethodInfo entry : entries) {
+        Map<String, Object> node = buildTreeNode(
+            entry.getFullSignature(), 
+            methodMap, 
+            callGraph, 
+            new HashSet<>(), 
+            0, 
+            5 // 最大深度
+        );
+        if (node != null) rootChildren.add(node);
+    }
+
+    return Map.of("name", "Root", "children", rootChildren);
+}
+
+private Map<String, Object> buildTreeNode(
+    String signature,
+    Map<String, MethodInfo> methodMap,
+    Map<String, Set<String>> callGraph,
+    Set<String> visited,
+    int depth,
+    int maxDepth
+) {
+    if (depth > maxDepth || visited.contains(signature)) {
+        return null;
+    }
+    visited.add(signature);
+
+    MethodInfo method = methodInfoRepo.findByFullSignatureAndVersion(signature, "default").orElse(null);
+    String name = method != null ? getReadableName(signature) : signature;
+
+    Map<String, Object> node = new HashMap<>();
+    node.put("name", name);
+    node.put("fullSignature", signature); // 用于点击事件
+
+    Set<String> callees = callGraph.get(signature);
+    if (callees != null && !callees.isEmpty()) {
+        List<Map<String, Object>> children = new ArrayList<>();
+        for (String callee : callees) {
+            Map<String, Object> child = buildTreeNode(
+                callee, methodMap, callGraph, new HashSet<>(visited), depth + 1, maxDepth
+            );
+            if (child != null) children.add(child);
+        }
+        if (!children.isEmpty()) {
+            node.put("children", children);
+        }
+    }
+
+    return node;
+}
+
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Call Flow Mind Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.0/dist/echarts.min.js"></script>
+  <style>
+    body { margin: 0; padding: 20px; background: #f5f7fa; }
+    #chart { width: 100%; height: 800px; background: white; border-radius: 8px; }
+    .header { text-align: center; margin-bottom: 15px; }
+    button { padding: 6px 12px; margin: 0 5px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h3>🧠 方法调用思维导图</h3>
+  <button onclick="loadTree('default')">加载默认版本</button>
+  <!-- 可添加版本输入框 -->
+</div>
+
+<div id="chart"></div>
+
+<script>
+let currentVersion = 'default';
+let chart = echarts.init(document.getElementById('chart'));
+
+function loadTree(version) {
+  currentVersion = version;
+  fetch(`/api/graph/tree?version=${encodeURIComponent(version)}`)
+    .then(res => res.json())
+    .then(treeData => {
+      const option = {
+        tooltip: { trigger: 'item', triggerOn: 'mousemove' },
+        series: [{
+          type: 'tree',
+          orient: 'LR', // 从左到右布局
+          symbolSize: 45,
+          label: {
+            fontSize: 12,
+            color: '#333'
+          },
+          lineStyle: {
+            width: 2,
+            color: '#444'
+          },
+          emphasis: {
+            focus: 'descendant'
+          },
+          expandAndCollapse: true, // 允许折叠/展开
+          initialTreeDepth: 2,     // 初始展开2层
+           [treeData]
+        }]
+      };
+      chart.setOption(option, true);
+    });
+}
+
+// 绑定点击事件（查看源码）
+chart.on('click', (params) => {
+  if (params.data && params.data.fullSignature) {
+    const sig = params.data.fullSignature;
+    // 调用之前的源码查看逻辑
+    showMethodDetails(sig);
+  }
+});
+
+// 复用之前的源码弹窗（简化版）
+function showMethodDetails(signature) {
+  fetch(`/api/graph/source?signature=${encodeURIComponent(signature)}&version=${currentVersion}`)
+    .then(res => res.text())
+    .then(code => {
+      alert(`Source for ${signature}:\n\n${code.substring(0, 500)}...`);
+      // 实际项目中替换为模态框
+    });
+}
+
+// 初始加载
+loadTree('default');
+</script>
+
+</body>
+</html>
