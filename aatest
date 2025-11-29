@@ -112,3 +112,40 @@ test {
 
     expectStatus 500
 }
+
+// src/test/groovy/ApiTest.groovy
+@WebMvcTest
+class ApiTest extends Specification {
+
+    @Autowired MockMvc mvc
+
+    def "all api tests"() {
+        expect:
+        new File("src/test/resources/api-tests").eachFileMatch(~/.*\.groovy/) { file ->
+            evaluate(file)
+        }
+    }
+
+    // DSL 里直接调用的方法
+    def mock(Class clazz) { Mock(clazz) }
+    def get (String url)  { request("GET",  url) }
+    def post(String url)  { request("POST", url) }
+    def put (String url)  { request("PUT",  url) }
+    def delete(String url){ request("DELETE",url) }
+
+    private request(String method, String url, Closure<?> body = null) {
+        def builder = MockMvcRequestBuilders.request(method, url)
+                .contentType("application/json")
+        if (body) builder.content(JsonOutput.toJson(new JsonBuilder().call(body)))
+        this.lastResult = mvc.perform(builder).andReturn()
+    }
+
+    def status(int code) {
+        lastResult.response.status == code
+    }
+
+    def json(body) {
+        JsonOutput.prettyPrint(lastResult.response.contentAsString) ==
+                JsonOutput.prettyPrint(JsonOutput.toJson(new JsonBuilder().call(body)))
+    }
+}
