@@ -1,45 +1,64 @@
-// src/test/groovy/com/example/test/BaseMockMvcSpec.groovy
+// src/test/groovy/com/example/test/GlobalApiTest.groovy
 package com.example.test
 
+import groovy.io.FileType
+import org.spockframework.spring.SpringBean
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest
 import org.springframework.test.web.servlet.MockMvc
 import spock.lang.Specification
 
-import static org.springframework.http.MediaType.APPLICATION_JSON
+import static groovy.json.JsonOutput.toJson
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*
-import static groovy.json.JsonOutput.toJson
 
-@WebMvcTest  // 只加载 Web 层
-class BaseMockMvcSpec extends Specification {
+@WebMvcTest  // 自动加载所有 Controller
+class GlobalApiTest extends Specification {
 
     @Autowired
     MockMvc mockMvc
 
-    // DSL 入口（简化版，不再手动注册 SpringBean）
-    def api(Closure dslClosure) {
-        def dsl = new ApiTestDsl()
-        dslClosure.delegate = dsl
-        dslClosure.resolveStrategy = Closure.DELEGATE_FIRST
-        dslClosure.call()
-        
-        // 执行所有测试场景
-        dsl.scenarios.each { scenario ->
-            performTest(scenario)
+    // 关键：在这里提前声明所有可能被 mock 的 bean
+    // bean 名 = 类名首字母小写（Spring 默认命名规则）
+    @SpringBean UserService userService = Mock()
+    @SpringBean OrderService orderService = Mock()
+    @SpringBean PaymentService paymentService = Mock()
+    // ... 你项目有多少 Service，就在这里加一行，通用性极强！
+
+    def "执行所有 DSL 接口测试（真正通用的版本）"() {
+        given:
+        def dslDir = new File("src/test/resources/api-tests")
+        def scenarios = []
+
+        dslDir.traverse(type: FileType.FILES, nameFilter: ~/.*\.groovy/) { file ->
+            println "Loading DSL: ${file.name}"
+            def binding = new Binding()
+            binding.scenarios = scenarios
+            // 把所有 @SpringBean 字段注入到 DSL 里，供它直接使用
+            binding.userService = userService
+            binding.orderService = orderService
+            binding.paymentService = paymentService
+            // 如果你有更多 Service，就继续加：binding.xxxService = xxxService
+
+            new GroovyShell(binding).evaluate(file)
+        }
+
+        expect:
+        scenarios.each { s ->
+            println "Executing: ${s.description}"
+
+            def request = request(s.method, s.url)
+                    .contentType("application/json")
+                    .content(s.requestBody ? toJson(s.requestBody) : "")
+
+            s.headers?.each { k, v -> request.header(k, v) }
+
+            mockMvc.perform(request)
+                    .andDo(print())
+                    .andExpect(status().is(s.expectedStatus))
+                    .andExpect(s.expectedJson ? content().json(toJson(s.expectedJson)) : everything())
         }
     }
 
-    private void performTest(TestScenario scenario) {
-        def requestBuilder = request(scenario.method, scenario.url)
-                .contentType(APPLICATION_JSON)
-        
-        if (scenario.requestBody) {
-            requestBuilder.content(toJson(scenario.requestBody))
-        }
-        
-        mockMvc.perform(requestBuilder)
-                .andExpect(status().is(scenario.expectedStatus))
-                .andExpect(content().json(toJson(scenario.expectedJson)))
-                .andDo(print())
-    }
+    private everything() { true }
 }
