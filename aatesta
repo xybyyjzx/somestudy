@@ -1,0 +1,53 @@
+// src/test/groovy/com/example/ApiDslRunnerSpec.groovy
+@WebMvcTest
+class ApiDslRunnerSpec extends Specification {
+
+    @Autowired MockMvc mockMvc
+
+    // 自动加载 resources/api-tests 下所有 .groovy 文件
+    def "运行所有 DSL 接口测试"() {
+        given:
+        def dslFiles = new File("src/test/resources/api-tests")
+                .traverse(nameFilter: ~/.*\.groovy/) { it }
+
+        when:
+        dslFiles.each { file ->
+            println "Running: ${file.name}"
+            def binding = new Binding()
+            binding.mockMvc = mockMvc
+            binding.springBeans = [:]  // 用来收集 mock
+
+            def shell = new GroovyShell(binding)
+            shell.evaluate(file)
+
+            // 自动注册所有 mock 到 Spring 容器
+            binding.springBeans.each { name, mock ->
+                new SpringBean(this, name, mock).register()
+            }
+
+            // 执行文件中所有 test {}
+            binding.tests?.each { scenario ->
+                perform(scenario)
+            }
+        }
+
+        then:
+        noExceptionThrown()
+    }
+
+    private perform(scenario) {
+        def request = MockMvcRequestBuilders
+                .request(scenario.method, scenario.url)
+                .contentType(APPLICATION_JSON)
+
+        if (scenario.requestBody) {
+            request.content(JsonOutput.toJson(scenario.requestBody instanceof Closure ?
+                    new JsonBuilder().call(scenario.requestBody) : scenario.requestBody))
+        }
+
+        mockMvc.perform(request)
+                .andExpect(status().is(scenario.expectedStatus))
+                .andExpect(content().json(JsonOutput.toJson(scenario.expectedJson)))
+                .andDo(print())
+    }
+}
