@@ -66,3 +66,49 @@ class Scenario {
     def json
     Class<?> controller
 }
+
+// src/test/resources/api-tests/user-register.groovy
+
+// 1. 指定本次测试只加载这个 Controller
+controller com.example.controller.UserController
+
+// 2. 注册所有需要的 mock（支持多层依赖！）
+registerMock(com.example.service.UserService) { mock ->
+    // 正常注册
+    registerMock(com.example.repository.UserRepository) { repo ->
+        repo.existsByUsername("zhangsan") >> false
+        repo.save(_) >> new User(id: 999L, username: "zhangsan")
+    }
+
+    mock.register("zhangsan", "123456") >> {
+        new RegisterResult(success: true, userId: 999L)
+    }
+}
+
+// 3. 定义测试用例
+test {
+    description "注册成功"
+    method "POST"
+    url "/api/users/register"
+    body {
+        username "zhangsan"
+        password "123456"
+    }
+    expectStatus 200
+    expectJson {
+        success true
+        userId 999
+    }
+}
+
+test {
+    description "用户名已存在"
+    method "POST"
+    url "/api/users/register"
+    body { username "zhangsan"; password "666" }
+
+    // 直接覆盖上面的 mock 行为
+    mock(UserService).register("zhangsan", _) >> { throw new RuntimeException("用户已存在") }
+
+    expectStatus 500
+}
