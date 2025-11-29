@@ -1,125 +1,45 @@
-// src/test/groovy/com/example/dsl/UniversalDslEngine.groovy
-package com.example.dsl
+// src/test/groovy/com/example/test/BaseMockMvcSpec.groovy
+package com.example.test
 
-import spock.lang.Specification
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest
 import org.springframework.test.web.servlet.MockMvc
-import org.springframework.test.web.servlet.setup.MockMvcBuilders
-import groovy.json.JsonBuilder
-import org.springframework.http.MediaType
+import spock.lang.Specification
 
+import static org.springframework.http.MediaType.APPLICATION_JSON
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*
+import static groovy.json.JsonOutput.toJson
 
-class UniversalDslEngine extends Specification {
+@WebMvcTest  // 只加载 Web 层
+class BaseMockMvcSpec extends Specification {
 
+    @Autowired
     MockMvc mockMvc
-    Map<String, Object> beans = [:]
 
-    // 核心：模块 DSL
-    def 模块(String name, Closure c) {
-        def module = new ModuleDsl()
-        c.delegate = module
-        c.resolveStrategy = Closure.DELEGATE_FIRST
-        c()
-
-        println "\n开始执行模块: $name (${module.controllers.size()} 个 Controller)"
-
-        // 1. 创建所有 mock
-        module.mocks.each { className ->
-            def simpleName = className.simpleName.uncapitalize()
-            beans[simpleName] = mock(Class.forName(className))
-        }
-
-        // 2. 创建所有真实对象（通过构造函数注入）
-        module.injects.each { className ->
-            def clazz = Class.forName(className)
-            def simpleName = clazz.simpleName.uncapitalize()
-            def deps = clazz.declaredConstructors[0].parameterTypes.collect { type ->
-                beans[type.simpleName.uncapitalize()] ?: 
-                error("依赖未找到: $type (请先 mock 或 inject)")
-            }
-            beans[simpleName] = clazz.getDeclaredConstructor(*deps*.class).newInstance(*deps)
-        }
-
-        // 3. 创建 Controller 并构建 MockMvc
-        def controllers = module.controllers.collect { Class.forName(it).getDeclaredConstructor().newInstance() }
-        controllers.each { ctrl ->
-            // 自动注入依赖
-            ctrl.class.declaredFields.each { field ->
-                if (beans.containsKey(field.name)) {
-                    field.accessible = true
-                    field.set(ctrl, beans[field.name])
-                }
-            }
-        }
-
-        mockMvc = MockMvcBuilders.standaloneSetup(*controllers)
-                .alwaysDo { r ->
-                    println "状态码: ${r.response.status}"
-                    println "响应体(UTF-8): ${r.response.getContentAsString(UTF_8)}\n"
-                }
-                .build()
-
-        // 4. 执行该模块下的所有接口测试
-        module.tests.each { it() }
-    }
-
-    class ModuleDsl {
-        List<String> controllers = []
-        List<String> injects = []
-        List<String> mocks = []
-        List<Closure> tests = []
-
-        def controller(Class clazz) { controllers << clazz.name }
-        def 注入(Class... classes) { injects.addAll(classes*.name) }
-        def mock(Class... classes) { mocks.addAll(classes*.name) }
-
-        def 接口(String url, String method = "GET", String name = "", Closure c) {
-            tests << {
-                def test = new InterfaceDsl(url: url, 方法: method, 名称: name, mockMvc: mockMvc, beans: beans)
-                c.delegate = test
-                c.resolveStrategy = Closure.DELEGATE_FIRST
-                c()
-                println "  执行: $name"
-                test.run()
-            }
+    // DSL 入口（简化版，不再手动注册 SpringBean）
+    def api(Closure dslClosure) {
+        def dsl = new ApiTestDsl()
+        dslClosure.delegate = dsl
+        dslClosure.resolveStrategy = Closure.DELEGATE_FIRST
+        dslClosure.call()
+        
+        // 执行所有测试场景
+        dsl.scenarios.each { scenario ->
+            performTest(scenario)
         }
     }
 
-    // 重用之前的 InterfaceDsl（精简版）
-    static class InterfaceDsl {
-        String url, 方法 = "GET", 名称 = ""
-        Map 输入 = [:], mock = [:]
-        def 期望 = [状态码: null, 响应体: null, 错误字段包含: null]
-        MockMvc mockMvc
-        Map<String, Object> beans
-
-        def 输入(Closure c) { def m=[:]; c.delegate=m; c(); 输入=m }
-        def mock(Closure c) { def m=[:]; c.delegate=m; c(); mock=m }
-        def 期望(Closure c) { def e=[:]; c.delegate=e; c(); 期望=e }
-
-        void run() {
-            mock.each { k, v ->
-                def (b, m) = k.split('\\.') as List
-                beans[b]?."$m"(_) >> v
-            }
-
-            def req = switch (方法.toUpperCase()) {
-                case "POST"  -> post(url)
-                case "PUT"   -> put(url)
-                case "DELETE"-> delete(url)
-                default      -> get(url)
-            }.tap {
-                if (输入 && ["POST","PUT"].contains(方法.toUpperCase())) {
-                    contentType(MediaType.APPLICATION_JSON)
-                    content(new JsonBuilder(输入).toPrettyString())
-                }
-            }
-
-            def r = mockMvc.perform(req)
-            期望.状态码 && r.andExpect(status().is(期望.状态码 as int))
-            期望.响应体?.each { p, v -> r.andExpect(jsonPath("\$${p}").value(v)) }
-            期望.错误字段包含?.each { f -> r.andExpect(jsonPath("\$.errors[?(@.field == '$f')]").exists()) }
+    private void performTest(TestScenario scenario) {
+        def requestBuilder = request(scenario.method, scenario.url)
+                .contentType(APPLICATION_JSON)
+        
+        if (scenario.requestBody) {
+            requestBuilder.content(toJson(scenario.requestBody))
         }
+        
+        mockMvc.perform(requestBuilder)
+                .andExpect(status().is(scenario.expectedStatus))
+                .andExpect(content().json(toJson(scenario.expectedJson)))
+                .andDo(print())
     }
 }
