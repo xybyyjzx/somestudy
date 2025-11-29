@@ -1,64 +1,102 @@
-// src/test/groovy/com/example/test/GlobalApiTest.groovy
+// src/test/groovy/com/example/test/UniversalDslSpec.groovy
 package com.example.test
 
-import groovy.io.FileType
-import org.spockframework.spring.SpringBean
+import groovy.transform.CompileStatic
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest
+import org.springframework.context.ApplicationContext
 import org.springframework.test.web.servlet.MockMvc
 import spock.lang.Specification
+import org.spockframework.spring.SpringBean
 
 import static groovy.json.JsonOutput.toJson
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*
 
-@WebMvcTest  // 自动加载所有 Controller
-class GlobalApiTest extends Specification {
+@WebMvcTest
+@CompileStatic
+class UniversalDslSpec extends Specification {
 
-    @Autowired
-    MockMvc mockMvc
+    @Autowired MockMvc mockMvc
+    @Autowired ApplicationContext ctx
 
-    // 关键：在这里提前声明所有可能被 mock 的 bean
-    // bean 名 = 类名首字母小写（Spring 默认命名规则）
-    @SpringBean UserService userService = Mock()
-    @SpringBean OrderService orderService = Mock()
-    @SpringBean PaymentService paymentService = Mock()
-    // ... 你项目有多少 Service，就在这里加一行，通用性极强！
+    // 存储本次 DSL 运行时动态创建的 mock bean
+    private final Set<SpringBean> dynamicBeans = []
 
-    def "执行所有 DSL 接口测试（真正通用的版本）"() {
-        given:
-        def dslDir = new File("src/test/resources/api-tests")
-        def scenarios = []
-
-        dslDir.traverse(type: FileType.FILES, nameFilter: ~/.*\.groovy/) { file ->
-            println "Loading DSL: ${file.name}"
-            def binding = new Binding()
-            binding.scenarios = scenarios
-            // 把所有 @SpringBean 字段注入到 DSL 里，供它直接使用
-            binding.userService = userService
-            binding.orderService = orderService
-            binding.paymentService = paymentService
-            // 如果你有更多 Service，就继续加：binding.xxxService = xxxService
-
-            new GroovyShell(binding).evaluate(file)
-        }
+    def "执行所有独立 DSL 测试文件"() {
+        setup:
+        def dslFiles = new File("src/test/resources/api-tests")
+                .listFiles()?.findAll { it.name.endsWith(".groovy") } ?: []
 
         expect:
-        scenarios.each { s ->
-            println "Executing: ${s.description}"
-
-            def request = request(s.method, s.url)
-                    .contentType("application/json")
-                    .content(s.requestBody ? toJson(s.requestBody) : "")
-
-            s.headers?.each { k, v -> request.header(k, v) }
-
-            mockMvc.perform(request)
-                    .andDo(print())
-                    .andExpect(status().is(s.expectedStatus))
-                    .andExpect(s.expectedJson ? content().json(toJson(s.expectedJson)) : everything())
+        dslFiles.each { file ->
+            println "\n=== 执行 DSL 文件: ${file.name} ==="
+            runDslFile(file)
         }
     }
 
-    private everything() { true }
+    private void runDslFile(File file) {
+        def binding = new Binding()
+        binding.mockMvc = mockMvc
+        binding.ctx = ctx
+        binding.registerMock = this.&registerMock
+        binding.test = this.&executeTest
+
+        // 清空上一个文件的 mock
+        dynamicBeans.each { it.unregister() }
+        dynamicBeans.clear()
+
+        new GroovyShell(binding).evaluate(file)
+    }
+
+    // DSL 中调用的方法：注册一个 mock bean
+    def registerMock(Class<?> beanClass, Closure mockBehavior) {
+        def mock = Mock(beanClass)
+        mockBehavior.delegate = mock
+        mockBehavior.resolveStrategy = Closure.DELEGATE_ONLY
+        mockBehavior()
+
+        def beanName = beanClass.simpleName[0].toLowerCase() + beanClass.simpleName.substring(1)
+        def springBean = new SpringBean(this, beanName, mock)
+        springBean.registerSingleton()  // 关键：Spock 2.3 正确 API
+        dynamicBeans << springBean
+        mock
+    }
+
+    // DSL 中调用的方法：执行一次请求
+    def executeTest(Closure testCase) {
+        def scenario = new TestScenario()
+        testCase.delegate = scenario
+        testCase.resolveStrategy = Closure.DELEGATE_FIRST
+        testCase()
+
+        def controllerClass = scenario.controller
+        if (!ctx.containsBean(controllerClass.simpleName[0].toLowerCase() + controllerClass.simpleName.substring(1))) {
+            // 动态加载本次测试需要的 Controller
+            WebMvcTest.IncludeControllers include = ctx.getBean(WebMvcTest.IncludeControllers)
+            include.add(controllerClass)
+        }
+
+        def request = request(scenario.method, scenario.url)
+                .contentType("application/json")
+                .content(scenario.body ? toJson(scenario.body) : "")
+
+        scenario.headers?.each { k, v -> request.header(k, v) }
+
+        mockMvc.perform(request)
+                .andDo(print())
+                .andExpect(status().is(scenario.expectStatus))
+                .andExpect(scenario.expectJson ? content().json(toJson(scenario.expectJson)) : everything())
+    }
+}
+
+class TestScenario {
+    String description
+    String method = "POST"
+    String url
+    def body
+    Map<String, String> headers = [:]
+    int expectStatus = 200
+    def expectJson
+    Class<?> controller
 }
