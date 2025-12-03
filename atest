@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>自动点击助手</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    input { width: 60%; padding: 8px; margin-right: 10px; }
+    button { padding: 8px 16px; }
+    iframe { width: 100%; height: 600px; margin-top: 20px; border: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+  <h2>自动点击按钮工具</h2>
+  <p>请输入一个<strong>同源</strong的页面 URL（例如：/detail/123）</p>
+  <input type="text" id="urlInput" placeholder="例如：/detail/123" />
+  <button onclick="loadAndClick()">开始加载并点击</button>
+
+  <iframe id="targetFrame" sandbox="allow-same-origin allow-scripts"></iframe>
+
+  <script>
+    function loadAndClick() {
+      const url = document.getElementById('urlInput').value.trim();
+      if (!url) {
+        alert('请输入 URL');
+        return;
+      }
+
+      // 如果是相对路径，自动补全（可选）
+      const fullUrl = url.startsWith('http') ? url : (window.location.origin + url);
+
+      // 安全校验：只允许同源
+      try {
+        const targetOrigin = new URL(fullUrl).origin;
+        if (targetOrigin !== window.location.origin) {
+          alert('出于安全限制，仅支持同源页面（相同域名）！');
+          return;
+        }
+      } catch (e) {
+        alert('URL 格式无效');
+        return;
+      }
+
+      const iframe = document.getElementById('targetFrame');
+      iframe.src = fullUrl;
+
+      // 监听 iframe 加载完成
+      iframe.onload = function () {
+        try {
+          const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+          if (!iframeDoc) {
+            console.error('无法访问 iframe 内容');
+            return;
+          }
+
+          // 查找目标按钮 —— 请根据实际情况修改选择器
+          const button = iframeDoc.querySelector('button.confirm-btn'); // ← 替换为你需要的 CSS 选择器
+
+          if (button && !button.disabled) {
+            console.log('找到按钮，正在点击...');
+            button.click();
+            alert('已自动点击按钮！');
+          } else {
+            alert('未找到目标按钮（请检查选择器）');
+          }
+        } catch (error) {
+          console.error('操作 iframe 失败:', error);
+          alert('无法操作目标页面（可能是跨域或按钮未找到）');
+        }
+      };
+    }
+  </script>
+</body>
+</html>
