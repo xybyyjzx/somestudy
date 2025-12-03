@@ -149,3 +149,70 @@ class ApiTest extends Specification {
                 JsonOutput.prettyPrint(JsonOutput.toJson(new JsonBuilder().call(body)))
     }
 }
+
+
+
+
+(function () {
+  const checkInterval = 30000; // 30秒
+
+  async function checkListAndAct() {
+    try {
+      // 假设你的列表数据可以通过一个 API 获取（替换为实际的接口）
+      const response = await fetch('/your-list-api-endpoint'); // ← 替换为你的列表接口
+      const list = await response.json();
+
+      // 查找状态为 1 的第一条数据
+      const targetItem = list.find(item => item.status === 1); // ← 根据你的字段名调整（如 status / state 等）
+
+      if (targetItem) {
+        console.log('发现状态为1的数据:', targetItem);
+
+        // 跳转到详情页（根据你的路由规则构造 URL）
+        const detailUrl = `/detail/${targetItem.id}`; // ← 替换为你的详情页 URL 模板
+        window.location.href = detailUrl;
+        return true; // 停止后续轮询（可选）
+      } else {
+        console.log('未发现状态为1的数据，30秒后重试...');
+      }
+    } catch (error) {
+      console.error('检查列表时出错:', error);
+    }
+    return false;
+  }
+
+  // 页面加载完成后开始轮询
+  if (window.location.pathname === '/your-list-page-path') { // ← 替换为你的列表页路径，例如 '/tasks'
+    const intervalId = setInterval(async () => {
+      const shouldStop = await checkListAndAct();
+      if (shouldStop) {
+        clearInterval(intervalId);
+      }
+    }, checkInterval);
+
+    console.log('已启动状态监测脚本，每30秒检查一次...');
+  } else if (window.location.pathname.startsWith('/detail/')) {
+    // 如果已经在详情页，尝试自动点击按钮
+    const clickButton = () => {
+      // 替换为按钮的选择器（例如 class、id 或其他属性）
+      const button = document.querySelector('button.confirm-btn'); // ← 替换为实际按钮选择器
+      if (button && !button.disabled) {
+        button.click();
+        console.log('已自动点击按钮');
+        return true;
+      }
+      return false;
+    };
+
+    // 立即尝试点击（页面可能已加载）
+    if (!clickButton()) {
+      // 如果按钮还没加载，等一会儿再试（最多尝试几次）
+      let attempts = 0;
+      const tryClick = setInterval(() => {
+        if (clickButton() || ++attempts >= 10) {
+          clearInterval(tryClick);
+        }
+      }, 1000); // 每秒尝试一次，最多10秒
+    }
+  }
+})();
