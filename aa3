@@ -1,0 +1,115 @@
+function updateChart() {
+    myChart.setOption({
+        tooltip: {
+            formatter: params => params.data.name
+        },
+        legend: [{
+            data: ['Controller', '方法', 'Service', 'Repository', '工具类']
+        }],
+        series: [{
+            type: 'graph',
+            layout: 'dagre',
+            rankDir: 'TB',
+            // 删除 align: 'UL'，否则强制从左上开始，无法居中
+            nodesep: 100,
+            ranksep: 200,
+            controlPoints: true,
+            symbolSize: 50,
+            roam: true,
+            focusNodeAdjacency: true,
+            edgeSymbol: ['none', 'arrow'],
+            data: nodes,      // 你传入的原始 nodes（无 x/y）
+            links: links,
+            categories: [
+                { name: 'Controller' },
+                { name: '方法' },
+                { name: 'Service' },
+                { name: 'Repository' },
+                { name: '工具类' }
+            ],
+            label: {
+                show: true,
+                position: 'bottom',
+                formatter: function(param) {
+                    return param.name.split('.').pop();
+                }
+            },
+            lineStyle: {
+                width: 2,
+                curveness: 0.1
+            }
+        }]
+    }, { notMerge: false });
+
+    // ===== 在布局完成后，居中整个图 =====
+    myChart.off('finished');
+    myChart.on('finished', function () {
+        // 获取当前图表的完整 option（包含布局后带 x/y 的 data）
+        const currentOption = myChart.getOption();
+        const series = currentOption.series[0];
+        const data = series.data; // ✅ 这里是布局后的节点数组，已包含 x, y
+
+        if (!data || data.length === 0) return;
+
+        // 1. 计算节点包围盒
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let hasCoord = false;
+
+        data.forEach(node => {
+            if (node && typeof node.x === 'number' && typeof node.y === 'number') {
+                minX = Math.min(minX, node.x);
+                maxX = Math.max(maxX, node.x);
+                minY = Math.min(minY, node.y);
+                maxY = Math.max(maxY, node.y);
+                hasCoord = true;
+            }
+        });
+
+        if (!hasCoord) return; // 没有有效坐标，跳过
+
+        // 2. 计算偏移量，让图居中
+        const width = maxX - minX;
+        const height = maxY - minY;
+
+        const canvasWidth = myChart.getWidth();
+        const canvasHeight = myChart.getHeight();
+
+        const targetCenterX = canvasWidth / 2;
+        const targetCenterY = canvasHeight * 0.45; // 微微偏上，更美观（可改 0.5 居中）
+
+        const currentCenterX = minX + width / 2;
+        const currentCenterY = minY + height / 2;
+
+        const offsetX = targetCenterX - currentCenterX;
+        const offsetY = targetCenterY - currentCenterY;
+
+        // 3. 应用偏移，生成新 data
+        const newData = data.map(node => {
+            if (node && typeof node.x === 'number') {
+                return {
+                    ...node,
+                    x: node.x + offsetX,
+                    y: node.y + offsetY
+                };
+            }
+            return node;
+        });
+
+        // 4. 用新坐标更新图表（仅更新 data，不影响其他配置）
+        myChart.setOption({
+            series: [{
+                data: newData
+            }]
+        }, { notMerge: false });
+
+        // 可选：轻微缩放，让内容更舒适
+        // 注意：避免在 setOption 后立即 dispatch，可能被覆盖，加一点延迟
+        setTimeout(() => {
+            myChart.dispatchAction({
+                type: 'graphRoam',
+                zoom: 1.0
+            });
+        }, 50);
+    });
+}
