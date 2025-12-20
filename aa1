@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Java 方法调用关系图（ECharts + dagre）</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <!-- 引入 echarts-dagre 扩展，实现完美分层布局 -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts-dagre@0.1.2/dist/echarts-dagre.min.js"></script>
+    <style>
+        body { margin: 0; }
+        #chart { width: 100vw; height: 100vh; }
+    </style>
+</head>
+<body>
+    <div id="chart"></div>
+
+    <script>
+        const chartDom = document.getElementById('chart');
+        const myChart = echarts.init(chartDom);
+
+        // 模拟数据：节点和边会动态添加
+        let nodes = [];
+        let links = [];
+
+        // 节点 ID 自增
+        let nodeId = 0;
+
+        // 添加节点（避免重复）
+        function addNode(name, category, type = 'class') {
+            if (nodes.find(n => n.name === name)) return;
+            nodes.push({
+                id: nodeId++,
+                name: name,
+                symbolSize: type === 'class' ? 60 : 45,
+                category: category,
+                label: { show: true, formatter: name.split('.').pop() }  // 只显示类名或方法名
+            });
+        }
+
+        // 添加边
+        function addLink(source, target) {
+            if (!links.find(l => l.source === source && l.target === target)) {
+                links.push({ source, target });
+            }
+        }
+
+        // 初始：只加载所有 Controller
+        function loadControllers() {
+            const controllers = [
+                'com.example.controller.UserController',
+                'com.example.controller.OrderController'
+            ];
+
+            controllers.forEach(name => {
+                addNode(name, 0); // category 0 = Controller
+            });
+
+            updateChart();
+        }
+
+        // 点击节点时展开
+        myChart.on('click', function (params) {
+            if (params.dataType !== 'node') return;
+
+            const clickedName = params.name;
+
+            // 1. 点击 Controller → 展开它的方法
+            if (clickedName.includes('.controller.')) {
+                const methods = {
+                    'com.example.controller.UserController': [
+                        'getUserById(Long id)',
+                        'createUser(UserDTO dto)',
+                        'updateUser(Long id, UserDTO dto)'
+                    ],
+                    'com.example.controller.OrderController': [
+                        'createOrder(OrderDTO dto)',
+                        'getOrderById(Long id)'
+                    ]
+                }[clickedName] || [];
+
+                methods.forEach(m => {
+                    const methodName = `${clickedName}.${m}`;
+                    addNode(methodName, 1, 'method'); // category 1 = 方法
+                    addLink(clickedName, methodName);
+                });
+            }
+            // 2. 点击方法 → 展开调用的 Service
+            else if (clickedName.includes('(')) {  // 简单判断是方法
+                const calls = {
+                    'com.example.controller.UserController.getUserById(Long id)': ['com.example.service.UserService.findById(Long id)'],
+                    'com.example.controller.UserController.createUser(UserDTO dto)': ['com.example.service.UserService.save(UserDTO dto)'],
+                    'com.example.controller.UserController.updateUser(Long id, UserDTO dto)': ['com.example.service.UserService.update(Long id, UserDTO dto)'],
+                    'com.example.controller.OrderController.createOrder(OrderDTO dto)': [
+                        'com.example.service.OrderService.create(OrderDTO dto)',
+                        'com.example.service.InventoryService.reduceStock(Long itemId, Integer num)'
+                    ],
+                    'com.example.controller.OrderController.getOrderById(Long id)': ['com.example.service.OrderService.findById(Long id)']
+                }[clickedName] || [];
+
+                calls.forEach(target => {
+                    addNode(target, 2); // category 2 = Service 方法
+                    addLink(clickedName, target);
+                });
+            }
+            // 3. 点击 Service 方法 → 继续展开（例如调用其他 Service 或 Repository）
+            else if (clickedName.includes('.service.')) {
+                const deeper = {
+                    'com.example.service.UserService.findById(Long id)': ['com.example.repository.UserRepository.findById(Long id)'],
+                    'com.example.service.OrderService.create(OrderDTO dto)': ['com.example.util.IdGenerator.nextId()'],
+                    'com.example.service.InventoryService.reduceStock(Long itemId, Integer num)': ['com.example.repository.InventoryRepository.updateStock(Long itemId, Integer num)']
+                }[clickedName] || [];
+
+                deeper.forEach(target => {
+                    const cat = target.includes('.repository.') ? 3 : target.includes('.util.') ? 4 : 2;
+                    addNode(target, cat);
+                    addLink(clickedName, target);
+                });
+            }
+
+            updateChart();
+        });
+
+        // 更新图表
+        function updateChart() {
+            myChart.setOption({
+                tooltip: {
+                    formatter: params => params.data.name
+                },
+                legend: [{
+                    data: ['Controller', '方法', 'Service', 'Repository', '工具类']
+                }],
+                series: [{
+                    type: 'graph',
+                    layout: 'dagre',           // 分层布局（关键！）
+                    symbolSize: 50,
+                    roam: true,                // 允许缩放和平移
+                    edgeSymbol: ['none', 'arrow'],
+                    edgeLabel: { show: false },
+                    data: nodes,
+                    links: links,
+                    categories: [
+                        { name: 'Controller' },
+                        { name: '方法' },
+                        { name: 'Service' },
+                        { name: 'Repository' },
+                        { name: '工具类' }
+                    ],
+                    label: {
+                        show: true,
+                        position: 'right',
+                        formatter: '{b}'
+                    },
+                    lineStyle: {
+                        width: 2,
+                        curveness: 0.1
+                    }
+                }]
+            }, { notMerge: false });  // 保留已有节点，追加新节点
+        }
+
+        // 启动
+        loadControllers();
+    </script>
+</body>
+</html>
