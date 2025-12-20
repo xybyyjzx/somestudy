@@ -1,0 +1,107 @@
+function updateChart() {
+    myChart.setOption({
+        tooltip: {
+            formatter: params => params.data.name
+        },
+        legend: [{
+            data: ['Controller', '方法', 'Service', 'Repository', '工具类']
+        }],
+        series: [{
+            type: 'graph',
+            layout: 'dagre',
+            rankDir: 'TB',
+            // 注意：移除 align: 'UL'，因为它强制从左上开始，不利于居中
+            // align: 'UL',  // ← 删除这一行！
+            nodesep: 100,
+            ranksep: 200,
+            controlPoints: true,
+            symbolSize: 50,
+            roam: true,
+            focusNodeAdjacency: true,
+            edgeSymbol: ['none', 'arrow'],
+            data: nodes,
+            links: links,
+            categories: [
+                { name: 'Controller' },
+                { name: '方法' },
+                { name: 'Service' },
+                { name: 'Repository' },
+                { name: '工具类' }
+            ],
+            label: {
+                show: true,
+                position: 'bottom',
+                formatter: function(param) {
+                    return param.name.split('.').pop();
+                }
+            },
+            lineStyle: {
+                width: 2,
+                curveness: 0.1
+            }
+        }]
+    }, { notMerge: false });
+
+    // ===== 核心：等 dagre 布局完成，手动居中节点 =====
+    myChart.off('finished');
+    myChart.on('finished', function () {
+        const seriesData = myChart.getModel().getSeries()[0].originalData;
+        const data = seriesData.data;
+
+        // 1. 找出所有节点的实际 x/y 范围（bounding box）
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+
+        data.forEach(item => {
+            if (item.value && item.value.x !== undefined) {
+                minX = Math.min(minX, item.value.x);
+                maxX = Math.max(maxX, item.value.x);
+                minY = Math.min(minY, item.value.y);
+                maxY = Math.max(maxY, item.value.y);
+            }
+        });
+
+        if (minX === Infinity) return; // 无有效节点
+
+        const width = maxX - minX;
+        const height = maxY - minY;
+
+        // 2. 计算画布中心
+        const canvasWidth = myChart.getWidth();
+        const canvasHeight = myChart.getHeight();
+
+        const centerX = canvasWidth / 2;
+        const centerY = canvasHeight / 2;
+
+        // 3. 计算每个节点需要偏移的量（让图的中心对齐画布中心）
+        const offsetX = centerX - (minX + width / 2);
+        const offsetY = centerY - (minY + height / 2);
+
+        // 4. 更新每个节点的 x/y（注意：必须通过 setOption 更新！）
+        const newData = data.map(item => {
+            if (item.value && item.value.x !== undefined) {
+                return {
+                    ...item.value,
+                    x: item.value.x + offsetX,
+                    y: item.value.y + offsetY
+                };
+            }
+            return item.value;
+        });
+
+        // 5. 用新坐标刷新图表（不重置其他配置）
+        myChart.setOption({
+            series: [{
+                data: newData
+            }]
+        });
+
+        // 可选：稍微放大一点，让内容更舒适
+        setTimeout(() => {
+            myChart.dispatchAction({
+                type: 'graphRoam',
+                zoom: 1.0 // 或 1.1
+            });
+        }, 50);
+    });
+}
