@@ -1,0 +1,2534 @@
+### USER
+我有一个计算逻辑，需要很多步骤，我想可视化这些步骤，并且节点之间可以调整 ，断点，节点输入数据可以来源不同比如json excel 等。可以看计算到哪个节点了等功能 我用springboot 3 vue3 jdk21 。
+
+### ASSISTANT
+你这个需求本质上是一个 **可视化计算流程编排 + 可调试执行引擎**。
+
+用一句话概括：
+
+> 前端用流程图编辑器定义节点和连线，后端按 DAG 执行计算步骤，支持断点、单步执行、状态回显，每个节点的输入可以来自 JSON、Excel、数据库、上一节点输出等不同数据源。
+
+技术栈用 **Spring Boot 3 + JDK 21 + Vue 3** 非常合适。
+
+---
+
+# 一、先给结论：推荐方案
+
+如果你的重点是：
+
+- 计算步骤可视化
+- 节点可以拖拽、连线、调整顺序
+- 支持断点、查看当前执行到哪个节点
+- 节点输入来源可配置
+- 更偏向数据处理、计算流水线，而不是审批流、企业 BPMN 流程
+
+那我建议你采用：
+
+> **Vue3 流程图编辑器 + 自研轻量 DAG 执行引擎**
+
+而不是直接上 Flowable / Camunda 这类传统工作流引擎。
+
+原因是：
+
+1. 你的场景更像 **计算流水线 / DAG Pipeline**
+2. 你需要断点、单步、节点输入数据查看，这类调试能力自研更灵活
+3. BPMN 引擎偏业务流程，适合审批、任务、候选人、流程历史、会签等
+4. 你的节点执行可能是纯计算、数据转换、Excel 解析、JSON 处理，不需要复杂 BPMN 语义
+
+---
+
+# 二、整体架构设计
+
+可以设计成下面这样：
+
+```text
+┌────────────────────────────────────────────────────┐
+│                    Vue3 前端                       │
+│                                                    │
+│  流程画布     节点配置     数据源配置     运行监控   │
+│     │            │             │             │     │
+│     └────────────┴─────────────┴─────────────┘     │
+│                         │                          │
+│                  保存 / 执行 / 查询状态              │
+└─────────────────────────┬──────────────────────────┘
+                          │ HTTP / SSE / WebSocket
+┌─────────────────────────▼──────────────────────────┐
+│                 Spring Boot 3 后端                  │
+│                                                    │
+│  FlowController                                    │
+│      │                                             │
+│  FlowService                                       │
+│      │                                             │
+│  DAG 解析 / 校验 / 拓扑排序                          │
+│      │                                             │
+│  FlowExecutionEngine                               │
+│      │                                             │
+│  NodeExecutor 节点执行器                            │
+│      │                                             │
+│  DataSourceResolver 数据源解析器                     │
+│      │                                             │
+│  ExecutionContext 上下文                            │
+│      │                                             │
+│  ExecutionEventPublisher 状态事件推送                │
+│                                                    │
+└─────────────────────────┬──────────────────────────┘
+                          │
+┌─────────────────────────▼──────────────────────────┐
+│                     存储层                          │
+│                                                    │
+│  MySQL / PostgreSQL：流程定义、运行记录、节点状态       │
+│  MinIO / 本地文件：JSON、Excel、执行快照              │
+│  Redis：运行状态缓存、分布式锁、事件通道              │
+└────────────────────────────────────────────────────┘
+```
+
+---
+
+# 三、前端方案选择
+
+你要的是可视化节点编辑、连线、调整、运行状态高亮。
+
+## 推荐前端组件
+
+### 方案 1：Vue Flow，优先推荐
+
+适合 Vue3，比较现代，扩展性好。
+
+官网 / GitHub：
+
+```text
+https://vueflow.dev/
+https://github.com/bcakmakoglu/vue-flow
+```
+
+适合做：
+
+- 节点拖拽
+- 节点连线
+- 自定义节点
+- 节点状态高亮
+- 断点标记
+- 当前执行节点闪烁
+- 右键菜单
+- 节点配置抽屉
+
+我非常建议你用这个。
+
+---
+
+### 方案 2：LogicFlow
+
+滴滴开源，偏流程图，中文资料较多。
+
+```text
+https://github.com/didi/LogicFlow
+```
+
+适合：
+
+- 流程图编辑
+- 自定义节点
+- 企业内流程图场景
+
+如果你是 Vue3，也可以包装使用。
+
+---
+
+### 方案 3：AntV X6
+
+蚂蚁图编辑引擎，能力很强。
+
+```text
+https://x6.antv.antgroup.com/
+```
+
+适合：
+
+- 复杂图编辑
+- DAG
+- ER 图
+- 流程图
+
+缺点是学习成本稍高。
+
+---
+
+### 方案 4：bpmn.js
+
+如果你的流程偏 BPMN 审批流，可以用这个。
+
+```text
+https://github.com/bpmn-io/bpmn-js
+```
+
+但你的需求是计算逻辑，不是审批流，所以不是首选。
+
+---
+
+## 前端建议选型
+
+我建议你用：
+
+```text
+Vue 3 + TypeScript + Vite + Pinia + Vue Flow + Element Plus / Ant Design Vue
+```
+
+如果希望开发效率高：
+
+```text
+Vue3 + TypeScript + Vite + Pinia + Vue Flow + Element Plus + TailwindCSS
+```
+
+---
+
+# 四、核心概念设计
+
+你需要把流程定义成一张 DAG 图。
+
+DAG 就是：
+
+> Directed Acyclic Graph，有向无环图。
+
+例如：
+
+```text
+读取Excel -> 数据清洗 -> 计算金额 -> 汇总 -> 导出结果
+```
+
+或者：
+
+```text
+JSON输入 ──┐
+           ├──> 合并数据 -> 规则计算 -> 输出
+Excel输入 ─┘
+```
+
+---
+
+## 1. 流程定义 FlowDefinition
+
+前端保存给后端的数据可以长这样：
+
+```json
+{
+  "flowId": "flow_001",
+  "name": "订单计算流程",
+  "nodes": [
+    {
+      "id": "node_1",
+      "name": "读取Excel",
+      "type": "EXCEL_INPUT",
+      "position": {
+        "x": 100,
+        "y": 200
+      },
+      "config": {
+        "fileId": "file_001",
+        "sheetName": "Sheet1"
+      },
+      "breakpoint": false
+    },
+    {
+      "id": "node_2",
+      "name": "读取JSON",
+      "type": "JSON_INPUT",
+      "position": {
+        "x": 100,
+        "y": 400
+      },
+      "config": {
+        "fileId": "file_002"
+      },
+      "breakpoint": true
+    },
+    {
+      "id": "node_3",
+      "name": "合并数据",
+      "type": "MERGE",
+      "position": {
+        "x": 400,
+        "y": 300
+      },
+      "config": {
+        "strategy": "LEFT_JOIN"
+      },
+      "breakpoint": false
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_1",
+      "source": "node_1",
+      "target": "node_3"
+    },
+    {
+      "id": "edge_2",
+      "source": "node_2",
+      "target": "node_3"
+    }
+  ]
+}
+```
+
+---
+
+## 2. 节点定义 NodeDefinition
+
+每个节点至少包含：
+
+```java
+public class NodeDefinition {
+
+    private String id;
+
+    private String name;
+
+    private String type;
+
+    private Map<String, Object> config;
+
+    private boolean breakpoint;
+
+    private Position position;
+}
+```
+
+其中 `type` 很关键，例如：
+
+```text
+JSON_INPUT
+EXCEL_INPUT
+DB_INPUT
+HTTP_INPUT
+SCRIPT_NODE
+CALCULATION_NODE
+MERGE_NODE
+FILTER_NODE
+OUTPUT_NODE
+```
+
+---
+
+## 3. 边定义 EdgeDefinition
+
+```java
+public class EdgeDefinition {
+
+    private String id;
+
+    private String source;
+
+    private String target;
+
+    private String sourceHandle;
+
+    private String targetHandle;
+}
+```
+
+如果节点有多个输出端口，可以加 `sourceHandle`。
+
+例如：
+
+```text
+条件判断节点
+    ├─ true  -> 节点A
+    └─ false -> 节点B
+```
+
+---
+
+# 五、后端核心模型设计
+
+## 1. 流程定义表
+
+```sql
+CREATE TABLE flow_definition (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    flow_code VARCHAR(64) NOT NULL,
+    flow_name VARCHAR(128) NOT NULL,
+    flow_json TEXT NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    status VARCHAR(32) NOT NULL,
+    create_time DATETIME NOT NULL,
+    update_time DATETIME NOT NULL
+);
+```
+
+---
+
+## 2. 流程运行实例表
+
+```sql
+CREATE TABLE flow_run_instance (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    run_id VARCHAR(64) NOT NULL,
+    flow_code VARCHAR(64) NOT NULL,
+    flow_version INT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    current_node_ids TEXT,
+    start_time DATETIME,
+    end_time DATETIME,
+    error_message TEXT
+);
+```
+
+状态可以包括：
+
+```text
+READY
+RUNNING
+PAUSED
+SUCCESS
+FAILED
+CANCELED
+```
+
+---
+
+## 3. 节点运行记录表
+
+```sql
+CREATE TABLE node_run_instance (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    run_id VARCHAR(64) NOT NULL,
+    node_id VARCHAR(64) NOT NULL,
+    node_name VARCHAR(128),
+    node_type VARCHAR(64),
+    status VARCHAR(32) NOT NULL,
+    input_snapshot TEXT,
+    output_snapshot TEXT,
+    error_message TEXT,
+    start_time DATETIME,
+    end_time DATETIME
+);
+```
+
+节点状态：
+
+```text
+PENDING
+READY
+RUNNING
+WAITING_BREAKPOINT
+SUCCESS
+FAILED
+SKIPPED
+CANCELED
+```
+
+---
+
+# 六、执行引擎设计
+
+后端最核心的是执行引擎。
+
+执行流程如下：
+
+```text
+1. 接收前端执行请求
+2. 加载流程定义
+3. 解析 DAG
+4. 校验是否有环
+5. 创建运行实例 runId
+6. 找到入口节点
+7. 按依赖关系执行节点
+8. 每个节点执行前：
+   - 检查是否断点
+   - 检查上游节点是否完成
+   - 准备输入数据
+9. 执行节点
+10. 保存输入输出快照
+11. 发送节点状态变化事件给前端
+12. 继续执行下游节点
+13. 所有节点完成后流程结束
+```
+
+---
+
+# 七、DAG 执行方式
+
+## 1. 节点依赖关系
+
+比如：
+
+```text
+node1 -> node3
+node2 -> node3
+```
+
+那么 `node3` 必须等待 `node1` 和 `node2` 都完成。
+
+后端可以用：
+
+```java
+Map<String, List<String>> dependencies
+```
+
+表示：
+
+```java
+node3 depends on node1, node2
+```
+
+---
+
+## 2. 拓扑排序
+
+执行前要确保图没有环。
+
+可以用 Kahn 算法。
+
+简单思路：
+
+```text
+1. 统计每个节点入度
+2. 入度为 0 的节点先执行
+3. 节点完成后，减少下游节点入度
+4. 下游节点入度为 0 后进入可执行状态
+```
+
+---
+
+# 八、JDK 21 虚拟线程非常适合这个场景
+
+JDK 21 可以用虚拟线程执行节点任务。
+
+例如：
+
+```java
+ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+```
+
+适合：
+
+- 节点中有 IO 操作
+- 读取 Excel
+- 读取 JSON
+- 查数据库
+- 调 HTTP 接口
+- 文件导出
+
+但要注意：
+
+- 如果节点是 CPU 密集型计算，虚拟线程优势不明显
+- 需要控制并发数量
+- 需要注意上下文传递和异常处理
+
+---
+
+# 九、后端核心代码示例
+
+下面给一个可落地的核心骨架。
+
+---
+
+## 1. Maven 依赖
+
+Spring Boot 3 + JDK 21：
+
+```xml
+<parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.0</version>
+</parent>
+
+<properties>
+    <java.version>21</java.version>
+</properties>
+
+<dependencies>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>com.mysql</groupId>
+        <artifactId>mysql-connector-j</artifactId>
+        <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <dependency>
+        <groupId>com.alibaba.fastjson2</groupId>
+        <artifactId>fastjson2</artifactId>
+        <version>2.0.49</version>
+    </dependency>
+
+    <dependency>
+        <groupId>com.alibaba</groupId>
+        <artifactId>easyexcel</artifactId>
+        <version>3.3.4</version>
+    </dependency>
+
+</dependencies>
+```
+
+Excel 解析推荐：
+
+```text
+EasyExcel
+```
+
+或者：
+
+```text
+Apache POI
+```
+
+我更推荐 EasyExcel，简单且内存表现好。
+
+---
+
+## 2. 节点执行结果
+
+```java
+public record NodeResult(
+        boolean success,
+        Object output,
+        String errorMessage
+) {
+
+    public static NodeResult ok(Object output) {
+        return new NodeResult(true, output, null);
+    }
+
+    public static NodeResult fail(String errorMessage) {
+        return new NodeResult(false, null, errorMessage);
+    }
+}
+```
+
+---
+
+## 3. 节点执行器接口
+
+```java
+public interface NodeExecutor {
+
+    String type();
+
+    NodeResult execute(NodeExecutionContext context);
+}
+```
+
+---
+
+## 4. 节点执行上下文
+
+```java
+@Data
+@Builder
+public class NodeExecutionContext {
+
+    private String runId;
+
+    private String nodeId;
+
+    private NodeDefinition node;
+
+    private FlowExecutionContext flowContext;
+
+    private Map<String, Object> inputs;
+}
+```
+
+---
+
+## 5. 流程执行上下文
+
+用于保存每个节点的输出。
+
+```java
+public class FlowExecutionContext {
+
+    private final String runId;
+
+    private final Map<String, Object> nodeOutputs = new ConcurrentHashMap<>();
+
+    public FlowExecutionContext(String runId) {
+        this.runId = runId;
+    }
+
+    public void putOutput(String nodeId, Object output) {
+        nodeOutputs.put(nodeId, output);
+    }
+
+    public Object getOutput(String nodeId) {
+        return nodeOutputs.get(nodeId);
+    }
+
+    public String getRunId() {
+        return runId;
+    }
+}
+```
+
+如果数据很大，不要直接把所有数据放内存，可以存引用：
+
+```text
+output://runId/nodeId/output.json
+output://runId/nodeId/output.xlsx
+```
+
+---
+
+## 6. 节点执行器示例：JSON 输入节点
+
+```java
+@Component
+public class JsonInputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String type() {
+        return "JSON_INPUT";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+            Map<String, Object> config = context.getNode().getConfig();
+
+            String json = """
+                {
+                  "name": "demo",
+                  "amount": 100
+                }
+                """;
+
+            Object data = com.alibaba.fastjson2.JSON.parse(json);
+
+            return NodeResult.ok(data);
+
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+}
+```
+
+真实场景可以从文件、数据库、MinIO、前端上传文件中读取。
+
+---
+
+## 7. Excel 输入节点示例
+
+```java
+@Component
+public class ExcelInputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String type() {
+        return "EXCEL_INPUT";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+
+            Map<String, Object> config = context.getNode().getConfig();
+
+            String fileId = String.valueOf(config.get("fileId"));
+            String sheetName = String.valueOf(config.getOrDefault("sheetName", "Sheet1"));
+
+            // 这里从文件系统、MinIO、数据库读取 Excel
+            // InputStream inputStream = fileService.getInputStream(fileId);
+
+            // 示例返回
+            List<Map<String, Object>> rows = new ArrayList<>();
+
+            Map<String, Object> row = new HashMap<>();
+            row.put("orderId", "A001");
+            row.put("amount", 100);
+            rows.add(row);
+
+            return NodeResult.ok(rows);
+
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+}
+```
+
+EasyExcel 读取示例：
+
+```java
+List<Map<Integer, String>> list = EasyExcel.read(inputStream)
+        .sheet(sheetName)
+        .doReadSync();
+```
+
+---
+
+# 十、断点功能怎么设计
+
+你提到：
+
+> 断点，可以看计算到哪个节点了
+
+这个功能非常关键。
+
+---
+
+## 1. 节点断点字段
+
+前端可以右键节点设置断点：
+
+```json
+{
+  "id": "node_3",
+  "breakpoint": true
+}
+```
+
+---
+
+## 2. 执行前检查断点
+
+执行节点前：
+
+```java
+if (node.isBreakpoint()) {
+    pauseRun(runId, nodeId);
+    publishEvent(runId, nodeId, "WAITING_BREAKPOINT");
+    return;
+}
+```
+
+流程状态变为：
+
+```text
+PAUSED
+```
+
+当前节点状态：
+
+```text
+WAITING_BREAKPOINT
+```
+
+前端高亮该节点。
+
+---
+
+## 3. 断点恢复
+
+前端提供按钮：
+
+```text
+继续执行
+单步执行
+终止执行
+重新执行当前节点
+从当前节点开始执行
+```
+
+后端接口：
+
+```http
+POST /api/runs/{runId}/resume
+POST /api/runs/{runId}/step
+POST /api/runs/{runId}/stop
+POST /api/runs/{runId}/nodes/{nodeId}/rerun
+```
+
+---
+
+## 4. 断点运行时数据结构
+
+可以用 Redis 或内存保存运行控制状态。
+
+```java
+public class RunControl {
+
+    private String runId;
+
+    private volatile boolean paused;
+
+    private volatile boolean stepMode;
+
+    private volatile boolean canceled;
+
+    private Set<String> waitingNodes = ConcurrentHashMap.newKeySet();
+}
+```
+
+如果是单机，内存可以。
+
+如果是集群，建议 Redis：
+
+```text
+run:control:{runId}
+```
+
+---
+
+# 十一、实时显示当前执行到哪个节点
+
+你需要后端把节点状态实时推给前端。
+
+有三种方案：
+
+---
+
+## 方案 1：SSE，推荐
+
+SSE 简单，适合服务端向浏览器推送。
+
+```text
+GET /api/runs/{runId}/events
+```
+
+优点：
+
+- 实现简单
+- Spring Boot 支持好
+- 浏览器原生支持
+- 适合运行状态推送
+
+---
+
+## 方案 2：WebSocket
+
+适合更复杂的双向通信。
+
+例如：
+
+- 前端随时发送暂停
+- 前端随时发送恢复
+- 前端发送调试命令
+
+如果你要做比较强的调试器，可以用 WebSocket。
+
+---
+
+## 方案 3：轮询
+
+最简单：
+
+```text
+GET /api/runs/{runId}/status
+```
+
+每 1 秒查一次。
+
+优点：
+
+- 最简单
+- 稳定
+
+缺点：
+
+- 实时性差
+- 请求多
+
+MVP 阶段可以先轮询，后面再升级 SSE。
+
+---
+
+## 推荐组合
+
+```text
+MVP：REST + 轮询
+正式版：REST + SSE
+强交互调试版：REST + WebSocket
+```
+
+---
+
+# 十二、SSE 示例
+
+## Controller
+
+```java
+@RestController
+@RequestMapping("/api/runs")
+public class RunEventController {
+
+    private final RunEventService runEventService;
+
+    public RunEventController(RunEventService runEventService) {
+        this runEventService = runEventService;
+    }
+
+    @GetMapping(value = "/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter subscribe(@PathVariable String runId) {
+        SseEmitter emitter = new SseEmitter(0L);
+        runEventService.addEmitter(runId, emitter);
+        return emitter;
+    }
+}
+```
+
+---
+
+## 事件服务
+
+```java
+@Service
+public class RunEventService {
+
+    private final Map<String, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
+
+    public void addEmitter(String runId, SseEmitter emitter) {
+        emitters.computeIfAbsent(runId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+
+        emitter.onCompletion(() -> remove(runId, emitter));
+        emitter.onTimeout(() -> remove(runId, emitter));
+        emitter.onError(e -> remove(runId, emitter));
+    }
+
+    public void publish(String runId, Object event) {
+        List<SseEmitter> list = emitters.get(runId);
+
+        if (list == null) {
+            return;
+        }
+
+        for (SseEmitter emitter : list) {
+            try {
+                emitter.send(SseEmitter.event()
+                        .name("node-event")
+                        .data(event));
+            } catch (Exception e) {
+                emitter.complete();
+            }
+        }
+    }
+
+    private void remove(String runId, SseEmitter emitter) {
+        List<SseEmitter> list = emitters.get(runId);
+        if (list != null) {
+            list.remove(emitter);
+        }
+    }
+}
+```
+
+---
+
+## 推送事件示例
+
+```json
+{
+  "runId": "run_001",
+  "nodeId": "node_3",
+  "status": "RUNNING",
+  "timestamp": "2026-08-21T10:00:00"
+}
+```
+
+前端收到后更新节点颜色：
+
+```text
+PENDING：灰色
+READY：蓝色
+RUNNING：蓝色闪烁
+WAITING_BREAKPOINT：橙色
+SUCCESS：绿色
+FAILED：红色
+SKIPPED：灰色虚线
+```
+
+---
+
+# 十三、数据源设计
+
+你说：
+
+> 节点输入数据可以来源不同，比如 JSON、Excel 等
+
+这里要抽象成数据源解析器。
+
+---
+
+## 1. DataSourceResolver 接口
+
+```java
+public interface DataSourceResolver {
+
+    String type();
+
+    Object resolve(DataSourceContext context);
+}
+```
+
+---
+
+## 2. 数据源上下文
+
+```java
+@Data
+@Builder
+public class DataSourceContext {
+
+    private String runId;
+
+    private String nodeId;
+
+    private Map<String, Object> config;
+
+    private FlowExecutionContext flowContext;
+}
+```
+
+---
+
+## 3. 数据源类型
+
+```text
+JSON_FILE
+JSON_TEXT
+EXCEL_FILE
+DATABASE
+HTTP_API
+PREVIOUS_NODE
+MANUAL_INPUT
+```
+
+---
+
+## 4. 节点输入配置示例
+
+节点可以从多个输入源取数。
+
+```json
+{
+  "id": "node_5",
+  "name": "计算节点",
+  "type": "CALCULATION",
+  "inputs": [
+    {
+      "name": "orderData",
+      "sourceType": "PREVIOUS_NODE",
+      "sourceNodeId": "node_1"
+    },
+    {
+      "name": "configData",
+      "sourceType": "JSON_FILE",
+      "fileId": "file_001"
+    },
+    {
+      "name": "priceData",
+      "sourceType": "EXCEL_FILE",
+      "fileId": "file_002",
+      "sheetName": "price"
+    }
+  ]
+}
+```
+
+后端执行节点前，根据 `inputs` 解析出：
+
+```java
+Map<String, Object> inputs = new HashMap<>();
+inputs.put("orderData", ...);
+inputs.put("configData", ...);
+inputs.put("priceData", ...);
+```
+
+---
+
+## 5. 数据源解析器注册
+
+```java
+@Service
+public class DataSourceResolverFactory {
+
+    private final Map<String, DataSourceResolver> resolverMap = new HashMap<>();
+
+    public DataSourceResolverFactory(List<DataSourceResolver> resolvers) {
+        for (DataSourceResolver resolver : resolvers) {
+            resolverMap.put(resolver.type(), resolver);
+        }
+    }
+
+    public DataSourceResolver getResolver(String type) {
+        DataSourceResolver resolver = resolverMap.get(type);
+        if (resolver == null) {
+            throw new IllegalArgumentException("不支持的数据源类型: " + type);
+        }
+        return resolver;
+    }
+}
+```
+
+---
+
+# 十四、节点输入输出快照
+
+为了支持调试，建议每个节点执行时保存：
+
+```text
+输入数据
+输出数据
+错误信息
+执行耗时
+```
+
+但是注意：
+
+- 小数据可以直接存数据库 JSON
+- 大数据要存文件或对象存储
+- 数据库只保存引用
+
+例如：
+
+```json
+{
+  "inputRef": "snapshot://run_001/node_1/input.json",
+  "outputRef": "snapshot://run_001/node_1/output.json"
+}
+```
+
+前端点击节点时可以查看：
+
+```text
+输入参数
+输出结果
+日志
+错误堆栈
+执行时间
+```
+
+这对于调试非常重要。
+
+---
+
+# 十五、前端 Vue Flow 示例
+
+下面给一个最简单的 Vue Flow 页面示例。
+
+## 安装
+
+```bash
+npm install @vue-flow/core @vue-flow/background @vue-flow/controls
+```
+
+---
+
+## 简单画布
+
+```vue
+<script setup lang="ts">
+import { VueFlow } from '@vue-flow/core'
+import { Background } from '@vue-flow/background'
+import { Controls } from '@vue-flow/controls'
+import '@vue-flow/core/dist/style.css'
+import '@vue-flow/core/dist/theme-defaults.css'
+
+const nodes = [
+  {
+    id: 'node_1',
+    type: 'input',
+    label: '读取Excel',
+    position: { x: 100, y: 100 }
+  },
+  {
+    id: 'node_2',
+    label: '数据清洗',
+    position: { x: 300, y: 200 }
+  },
+  {
+    id: 'node_3',
+    type: 'output',
+    label: '输出结果',
+    position: { x: 500, y: 300 }
+  }
+]
+
+const edges = [
+  {
+    id: 'edge_1',
+    source: 'node_1',
+    target: 'node_2'
+  },
+  {
+    id: 'edge_2',
+    source: 'node_2',
+    target: 'node_3'
+  }
+]
+</script>
+
+<template>
+  <div style="width: 100vw; height: 100vh">
+    <VueFlow
+      v-model:nodes="nodes"
+      v-model:edges="edges"
+      fit-view-on-init
+    >
+      <Background />
+      <Controls />
+    </VueFlow>
+  </div>
+</template>
+```
+
+---
+
+# 十六、前端运行状态高亮
+
+可以维护一个状态对象：
+
+```ts
+const nodeStatusMap = reactive<Record<string, string>>({
+  node_1: 'PENDING',
+  node_2: 'PENDING',
+  node_3: 'PENDING'
+})
+```
+
+监听 SSE：
+
+```ts
+const source = new EventSource(`/api/runs/${runId}/events`)
+
+source.addEventListener('node-event', event => {
+  const data = JSON.parse(event.data)
+
+  nodeStatusMap[data.nodeId] = data.status
+})
+```
+
+然后动态修改节点样式：
+
+```ts
+const nodes = computed(() => {
+  return rawNodes.value.map(node => {
+    const status = nodeStatusMap[node.id]
+
+    return {
+      ...node,
+      style: {
+        border: getStatusBorder(status),
+        background: getStatusBackground(status)
+      }
+    }
+  })
+})
+```
+
+状态颜色建议：
+
+```ts
+function getStatusBackground(status: string) {
+  switch (status) {
+    case 'RUNNING':
+      return '#e6f4ff'
+    case 'SUCCESS':
+      return '#f6ffed'
+    case 'FAILED':
+      return '#fff2f0'
+    case 'WAITING_BREAKPOINT':
+      return '#fffbe6'
+    default:
+      return '#ffffff'
+  }
+}
+```
+
+---
+
+# 十七、前端断点交互
+
+可以在节点上显示红点。
+
+自定义节点组件：
+
+```vue
+<template>
+  <div class="node">
+    <span v-if="data.breakpoint" class="breakpoint-dot" />
+    <div>{{ data.label }}</div>
+    <div class="status">{{ data.status }}</div>
+  </div>
+</template>
+
+<style scoped>
+.node {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: white;
+  position: relative;
+}
+
+.breakpoint-dot {
+  width: 10px;
+  height: 10px;
+  background: red;
+  border-radius: 50%;
+  position: absolute;
+  top: -4px;
+  right: -4px;
+}
+</style>
+```
+
+右键菜单可以有：
+
+```text
+设置断点
+取消断点
+查看输入
+查看输出
+从此节点开始执行
+重新执行当前节点
+```
+
+---
+
+# 十八、推荐接口设计
+
+## 1. 流程定义接口
+
+```text
+POST   /api/flows
+GET    /api/flows
+GET    /api/flows/{flowId}
+PUT    /api/flows/{flowId}
+DELETE /api/flows/{flowId}
+```
+
+---
+
+## 2. 流程执行接口
+
+```text
+POST /api/flows/{flowId}/run
+POST /api/runs/{runId}/resume
+POST /api/runs/{runId}/step
+POST /api/runs/{runId}/stop
+POST /api/runs/{runId}/nodes/{nodeId}/rerun
+```
+
+---
+
+## 3. 运行状态接口
+
+```text
+GET /api/runs/{runId}
+GET /api/runs/{runId}/nodes
+GET /api/runs/{runId}/nodes/{nodeId}
+GET /api/runs/{runId}/nodes/{nodeId}/input
+GET /api/runs/{runId}/nodes/{nodeId}/output
+GET /api/runs/{runId}/events
+```
+
+---
+
+## 4. 数据源接口
+
+```text
+POST /api/datasources/upload-json
+POST /api/datasources/upload-excel
+GET  /api/datasources
+GET  /api/datasources/{id}/preview
+DELETE /api/datasources/{id}
+```
+
+---
+
+# 十九、执行引擎伪代码
+
+```java
+@Service
+public class FlowExecutionEngine {
+
+    private final NodeExecutorFactory nodeExecutorFactory;
+    private final DataSourceResolverFactory dataSourceResolverFactory;
+    private final RunEventService runEventService;
+
+    public FlowExecutionEngine(
+            NodeExecutorFactory nodeExecutorFactory,
+            DataSourceResolverFactory dataSourceResolverFactory,
+            RunEventService runEventService
+    ) {
+        this.nodeExecutorFactory = nodeExecutorFactory;
+        this.dataSourceResolverFactory = dataSourceResolverFactory;
+        this.runEventService = runEventService;
+    }
+
+    public String run(FlowDefinition flow) {
+
+        String runId = UUID.randomUUID().toString();
+
+        FlowExecutionContext context = new FlowExecutionContext(runId);
+
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+
+        Map<String, NodeDefinition> nodeMap = flow.getNodes()
+                .stream()
+                .collect(Collectors.toMap(NodeDefinition::getId, n -> n));
+
+        Map<String, List<String>> downstreamMap = buildDownstreamMap(flow);
+
+        Map<String, Integer> indegreeMap = buildIndegreeMap(flow);
+
+        Queue<String> readyNodes = new ConcurrentLinkedQueue<>();
+
+        indegreeMap.forEach((nodeId, indegree) -> {
+            if (indegree == 0) {
+                readyNodes.add(nodeId);
+            }
+        });
+
+        while (!readyNodes.isEmpty()) {
+
+            String nodeId = readyNodes.poll();
+
+            NodeDefinition node = nodeMap.get(nodeId);
+
+            executor.submit(() -> {
+
+                try {
+
+                    if (node.isBreakpoint()) {
+                        publish(runId, nodeId, "WAITING_BREAKPOINT");
+                        // 等待恢复
+                        return;
+                    }
+
+                    publish(runId, nodeId, "RUNNING");
+
+                    Map<String, Object> inputs = resolveInputs(node, context);
+
+                    NodeExecutionContext nodeContext = NodeExecutionContext.builder()
+                            .runId(runId)
+                            .nodeId(nodeId)
+                            .node(node)
+                            .flowContext(context)
+                            .inputs(inputs)
+                            .build();
+
+                    NodeExecutor nodeExecutor = nodeExecutorFactory.getExecutor(node.getType());
+
+                    NodeResult result = nodeExecutor.execute(nodeContext);
+
+                    if (result.success()) {
+                        context.putOutput(nodeId, result.output());
+                        publish(runId, nodeId, "SUCCESS");
+                    } else {
+                        publish(runId, nodeId, "FAILED");
+                        return;
+                    }
+
+                    List<String> downstreamNodes = downstreamMap.getOrDefault(nodeId, List.of());
+
+                    for (String downstreamNodeId : downstreamNodes) {
+
+                        int rest = decrementIndegree(runId, downstreamNodeId);
+
+                        if (rest == 0) {
+                            readyNodes.add(downstreamNodeId);
+                        }
+                    }
+
+                } catch (Exception e) {
+                    publish(runId, nodeId, "FAILED");
+                }
+            });
+        }
+
+        return runId;
+    }
+
+    private void publish(String runId, String nodeId, String status) {
+        runEventService.publish(runId, Map.of(
+                "runId", runId,
+                "nodeId", nodeId,
+                "status", status,
+                "time", System.currentTimeMillis()
+        ));
+    }
+}
+```
+
+实际生产代码需要更完整处理：
+
+- 并发等待
+- 断点恢复
+- 失败策略
+- 重试
+- 超时
+- 取消
+- 事务
+- 持久化
+- 节点结果快照
+
+---
+
+# 二十、断点暂停与恢复的实现思路
+
+断点最难的地方是：
+
+> 执行线程不能简单阻塞整个流程，要能恢复。
+
+有三种实现方式。
+
+---
+
+## 方案 1：线程等待恢复，适合单机调试
+
+节点命中断点后，线程等待：
+
+```java
+synchronized (lock) {
+    while (paused) {
+        lock.wait();
+    }
+}
+```
+
+恢复时：
+
+```java
+synchronized (lock) {
+    paused = false;
+    lock.notifyAll();
+}
+```
+
+优点：
+
+- 简单
+- 适合单机调试
+
+缺点：
+
+- 服务重启后运行状态丢失
+- 不适合分布式
+
+---
+
+## 方案 2：状态机持久化，恢复时继续调度，推荐生产使用
+
+命中断点后：
+
+```text
+1. 保存当前运行状态
+2. 当前节点状态改为 WAITING_BREAKPOINT
+3. 流程状态改为 PAUSED
+4. 释放执行线程
+```
+
+用户点击继续：
+
+```text
+1. 加载 runId 状态
+2. 找到等待节点
+3. 重新提交执行
+```
+
+优点：
+
+- 可持久化
+- 重启可恢复
+- 适合生产
+
+缺点：
+
+- 设计稍复杂
+
+我更推荐这种。
+
+---
+
+## 方案 3：工作流引擎托管
+
+如果你用 Flowable / Camunda，可以用 Wait State。
+
+但你的场景是计算逻辑，所以自研更轻量。
+
+---
+
+# 二十一、节点失败怎么处理
+
+你需要设计失败策略。
+
+---
+
+## 1. 失败后停止整个流程
+
+默认推荐：
+
+```text
+一个节点失败，则整个 run 失败
+```
+
+前端显示红色节点。
+
+---
+
+## 2. 失败后跳过
+
+节点配置：
+
+```json
+{
+  "onError": "SKIP"
+}
+```
+
+---
+
+## 3. 失败后重试
+
+```json
+{
+  "retry": {
+    "maxAttempts": 3,
+    "delayMs": 1000
+  }
+}
+```
+
+---
+
+## 4. 失败后走异常分支
+
+如果节点有错误输出端口：
+
+```text
+success -> 正常节点
+failure -> 异常处理节点
+```
+
+适合复杂流程。
+
+---
+
+# 二十二、节点之间传递数据的方式
+
+有三种常见方式。
+
+---
+
+## 方案 1：内存传递
+
+适合小数据。
+
+```java
+context.putOutput(nodeId, result);
+```
+
+优点：
+
+- 快
+
+缺点：
+
+- 占内存
+- 重启丢失
+
+---
+
+## 方案 2：快照引用
+
+适合大数据。
+
+```java
+String outputRef = snapshotService.save(runId, nodeId, result);
+context.putOutput(nodeId, outputRef);
+```
+
+下游节点根据引用读取。
+
+优点：
+
+- 稳定
+- 可追溯
+- 可调试
+
+缺点：
+
+- 读写有 IO 成本
+
+---
+
+## 方案 3：混合模式，最推荐
+
+```text
+小数据：内存
+大数据：引用
+```
+
+例如：
+
+```java
+if (dataSize < 1MB) {
+    memoryContext.put(nodeId, data);
+} else {
+    String ref = storage.save(data);
+    memoryContext.put(nodeId, ref);
+}
+```
+
+---
+
+# 二十三、Excel / JSON 节点设计建议
+
+## JSON 输入节点
+
+配置：
+
+```json
+{
+  "sourceType": "JSON_FILE",
+  "fileId": "file_001",
+  "jsonPath": "$.data.items"
+}
+```
+
+可以用：
+
+```text
+FastJSON2
+Jackson
+JsonPath
+```
+
+---
+
+## Excel 输入节点
+
+配置：
+
+```json
+{
+  "sourceType": "EXCEL_FILE",
+  "fileId": "file_002",
+  "sheetName": "Sheet1",
+  "headerRowIndex": 0,
+  "dataStartRowIndex": 1
+}
+```
+
+输出：
+
+```java
+List<Map<String, Object>>
+```
+
+例如：
+
+```json
+[
+  {
+    "orderId": "A001",
+    "amount": 100
+  },
+  {
+    "orderId": "A002",
+    "amount": 200
+  }
+]
+```
+
+---
+
+## 数据库输入节点
+
+配置：
+
+```json
+{
+  "sourceType": "DATABASE",
+  "datasourceId": "db_001",
+  "sql": "select * from t_order where biz_date = :bizDate",
+  "params": {
+    "bizDate": "2026-08-21"
+  }
+}
+```
+
+注意 SQL 安全，不要让用户随意执行危险 SQL。
+
+---
+
+## HTTP 输入节点
+
+配置：
+
+```json
+{
+  "sourceType": "HTTP",
+  "method": "GET",
+  "url": "http://example.com/api/data",
+  "headers": {
+    "Authorization": "Bearer xxx"
+  }
+}
+```
+
+---
+
+# 二十四、可视化运行监控页面设计
+
+建议前端分成四个区域：
+
+```text
+┌──────────────────────────────────────────────┐
+│ 顶部工具栏：保存、运行、暂停、继续、单步、停止      │
+├───────────────┬──────────────────────────────┤
+│               │                              │
+│  节点物料栏    │        流程画布               │
+│               │                              │
+│  - JSON输入    │                              │
+│  - Excel输入   │                              │
+│  - 计算节点    │                              │
+│  - 合并节点    │                              │
+│  - 输出节点    │                              │
+│               │                              │
+├───────────────┴──────────────────────────────┤
+│ 底部运行面板：节点日志、输入、输出、状态、耗时      │
+└──────────────────────────────────────────────┘
+```
+
+---
+
+## 顶部工具栏
+
+```text
+保存流程
+发布流程
+运行
+暂停
+继续
+单步执行
+停止
+重新运行
+查看历史运行
+```
+
+---
+
+## 右侧节点配置
+
+点击节点后显示：
+
+```text
+节点名称
+节点类型
+是否断点
+失败策略
+超时时间
+重试次数
+输入数据源
+节点参数
+```
+
+---
+
+## 底部运行面板
+
+Tab 页：
+
+```text
+运行状态
+节点日志
+输入数据
+输出数据
+错误信息
+执行历史
+```
+
+---
+
+# 二十五、是否要用 Flowable / Camunda？
+
+这是很多人会纠结的问题。
+
+---
+
+## 适合用 Flowable / Camunda 的场景
+
+如果你有：
+
+- 审批流
+- 人工任务
+- 候选人 / 候选组
+- 会签
+- 驳回
+- 转办
+- 委派
+- 复杂业务状态流转
+- 流程历史追溯
+- BPMN 标准
+
+那可以用：
+
+```text
+Flowable
+Camunda
+```
+
+---
+
+## 不太适合你当前需求的原因
+
+你的需求是：
+
+- 计算节点
+- 数据输入节点
+- Excel / JSON 数据源
+- 断点调试
+- 当前执行节点高亮
+- 计算流水线
+
+这类需求用 BPMN 会比较别扭。
+
+比如：
+
+- 节点输入输出数据配置不天然
+- 断点调试不灵活
+- 计算节点扩展要自己包装
+- BPMN 图形和你要的 DAG 编辑体验不完全一致
+
+所以：
+
+> 如果你没有审批流需求，优先自研轻量 DAG 引擎。
+
+---
+
+# 二十六、推荐技术栈清单
+
+## 后端
+
+```text
+JDK 21
+Spring Boot 3
+Spring Web
+Spring Data JPA 或 MyBatis Plus
+MySQL / PostgreSQL
+Redis
+FastJSON2 / Jackson
+EasyExcel
+MinIO 或本地文件存储
+SSE 或 WebSocket
+```
+
+---
+
+## 前端
+
+```text
+Vue 3
+TypeScript
+Vite
+Pinia
+Vue Router
+Vue Flow
+Element Plus 或 Ant Design Vue
+Axios
+EventSource 或 WebSocket
+```
+
+---
+
+## 可选
+
+```text
+Docker Compose
+MinIO
+Nginx
+```
+
+---
+
+# 二十七、数据库设计建议
+
+## 数据源表
+
+```sql
+CREATE TABLE data_source (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    code VARCHAR(64) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    type VARCHAR(32) NOT NULL,
+    config TEXT NOT NULL,
+    create_time DATETIME NOT NULL
+);
+```
+
+---
+
+## 文件表
+
+```sql
+CREATE TABLE file_resource (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    file_code VARCHAR(64) NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    file_type VARCHAR(32) NOT NULL,
+    storage_path VARCHAR(512) NOT NULL,
+    size_bytes BIGINT,
+    create_time DATETIME NOT NULL
+);
+```
+
+---
+
+## 节点快照表
+
+```sql
+CREATE TABLE node_snapshot (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    run_id VARCHAR(64) NOT NULL,
+    node_id VARCHAR(64) NOT NULL,
+    input_ref VARCHAR(512),
+    output_ref VARCHAR(512),
+    log_ref VARCHAR(512),
+    create_time DATETIME NOT NULL
+);
+```
+
+---
+
+# 二十八、推荐项目结构
+
+```text
+src/main/java/com/example/flow
+├── controller
+│   ├── FlowController.java
+│   ├── RunController.java
+│   ├── DataSourceController.java
+│   └── RunEventController.java
+├── service
+│   ├── FlowService.java
+│   ├── RunService.java
+│   ├── DataSourceService.java
+│   └── SnapshotService.java
+├── engine
+│   ├── FlowExecutionEngine.java
+│   ├── FlowExecutionContext.java
+│   ├── NodeExecutionContext.java
+│   ├── NodeExecutor.java
+│   ├── NodeExecutorFactory.java
+│   ├── NodeResult.java
+│   └── DagValidator.java
+├── executor
+│   ├── JsonInputNodeExecutor.java
+│   ├── ExcelInputNodeExecutor.java
+│   ├── DbInputNodeExecutor.java
+│   ├── HttpInputNodeExecutor.java
+│   ├── CalculationNodeExecutor.java
+│   └── OutputNodeExecutor.java
+├── datasource
+│   ├── DataSourceResolver.java
+│   ├── DataSourceResolverFactory.java
+│   ├── JsonDataSourceResolver.java
+│   ├── ExcelDataSourceResolver.java
+│   ├── DbDataSourceResolver.java
+│   └── HttpDataSourceResolver.java
+├── model
+│   ├── FlowDefinition.java
+│   ├── NodeDefinition.java
+│   ├── EdgeDefinition.java
+│   ├── FlowRunInstance.java
+│   └── NodeRunInstance.java
+├── event
+│   ├── RunEventService.java
+│   └── NodeStatusEvent.java
+└── config
+    ├── AsyncConfig.java
+    └── WebConfig.java
+```
+
+---
+
+# 二十九、MVP 最小可用版本怎么做
+
+建议第一阶段不要做太复杂。
+
+---
+
+## 第一阶段 MVP
+
+目标：
+
+```text
+能画流程
+能保存流程
+能运行流程
+能看到当前执行节点
+能断点暂停
+能继续执行
+```
+
+功能范围：
+
+1. Vue Flow 画布
+2. 三种节点：
+   - JSON 输入
+   - Excel 输入
+   - 计算节点
+3. 后端 DAG 顺序执行
+4. 节点状态 SSE 推送
+5. 节点断点暂停
+6. 继续执行
+7. 节点输入输出查看
+
+---
+
+## 第二阶段增强
+
+1. 并行执行
+2. 条件分支
+3. 节点重试
+4. 节点超时
+5. 失败策略
+6. 数据源管理
+7. 文件上传
+8. Excel 预览
+9. JSON Path
+10. SQL 输入
+11. 历史运行记录
+12. 从指定节点开始执行
+13. 单步调试
+14. 运行快照对比
+
+---
+
+## 第三阶段高级能力
+
+1. 脚本节点：Groovy / JavaScript / Aviator / QLExpress
+2. 表达式引擎
+3. 子流程
+4. 分布式执行
+5. 任务队列
+6. 大数据量分片
+7. 节点性能分析
+8. 运行链路追踪
+9. 权限管理
+10. 多租户
+
+---
+
+# 三十、脚本节点建议
+
+如果后续你想让用户自定义计算逻辑，可以加脚本节点。
+
+推荐：
+
+```text
+Groovy
+```
+
+或者：
+
+```text
+QLExpress
+Aviator
+```
+
+如果计算规则比较简单，用表达式引擎即可：
+
+```text
+amount * price * discount
+```
+
+如果逻辑复杂，用 Groovy。
+
+但要注意安全：
+
+- 禁止访问文件系统
+- 禁止访问网络
+- 限制执行时间
+- 限制内存
+- 使用沙箱
+
+---
+
+# 三十一、关键难点与解决方案
+
+## 难点 1：断点恢复
+
+推荐：
+
+```text
+节点执行前检查断点
+命中断点后保存运行状态
+前端进入暂停态
+恢复时重新调度当前节点
+```
+
+不要用长时间阻塞线程的方式做生产系统。
+
+---
+
+## 难点 2：并行节点执行顺序
+
+用 DAG 入度控制：
+
+```text
+入度为 0 可执行
+上游完成后下游入度减一
+入度为 0 后进入执行队列
+```
+
+---
+
+## 难点 3：节点数据来源不同
+
+抽象成：
+
+```text
+DataSourceResolver
+```
+
+不要让节点执行器关心数据来自哪里。
+
+节点只拿：
+
+```java
+Map<String, Object> inputs
+```
+
+---
+
+## 难点 4：数据量大
+
+不要全部放内存。
+
+使用：
+
+```text
+快照引用
+文件存储
+分页读取
+流式处理
+```
+
+Excel 用 EasyExcel 流式读取。
+
+---
+
+## 难点 5：执行状态实时同步
+
+推荐：
+
+```text
+SSE
+```
+
+简单可靠。
+
+---
+
+# 三十二、一个完整执行流程示例
+
+假设流程如下：
+
+```text
+Excel输入 -> 数据清洗 -> 计算金额 -> 输出结果
+```
+
+用户点击运行。
+
+后端：
+
+```text
+1. 创建 runId
+2. 流程状态 RUNNING
+3. 执行 Excel输入节点
+4. 推送节点 RUNNING
+5. Excel节点成功
+6. 推送节点 SUCCESS
+7. 数据清洗节点开始
+8. 命中断点
+9. 推送 WAITING_BREAKPOINT
+10. 流程状态 PAUSED
+11. 前端橙色高亮数据清洗节点
+12. 用户点击继续
+13. 数据清洗节点继续执行
+14. 计算金额节点执行
+15. 输出结果节点执行
+16. 流程状态 SUCCESS
+17. 前端全部绿色
+```
+
+---
+
+# 三十三、我最推荐你的最终方案
+
+## 前端
+
+```text
+Vue3 + TypeScript + Vue Flow + Pinia + Element Plus
+```
+
+用 Vue Flow 做画布。
+
+自定义节点展示：
+
+- 节点名称
+- 节点类型图标
+- 断点红点
+- 运行状态
+- 执行耗时
+- 错误标记
+
+---
+
+## 后端
+
+```text
+Spring Boot 3 + JDK21 虚拟线程 + 自研 DAG 执行引擎
+```
+
+核心抽象：
+
+```text
+FlowDefinition
+NodeDefinition
+EdgeDefinition
+NodeExecutor
+DataSourceResolver
+FlowExecutionContext
+RunEventService
+```
+
+---
+
+## 实时通信
+
+```text
+SSE
+```
+
+如果后续要做强交互调试，再升级：
+
+```text
+WebSocket
+```
+
+---
+
+## 数据存储
+
+```text
+MySQL / PostgreSQL
+Redis
+MinIO 或本地文件
+```
+
+---
+
+# 三十四、简单说：你应该怎么做
+
+你可以按这个顺序做：
+
+## 第一步：先做一个最小画布
+
+用 Vue Flow 实现：
+
+- 拖节点
+- 连线
+- 删除节点
+- 删除连线
+- 保存为 JSON
+
+---
+
+## 第二步：后端能解析这个 JSON
+
+实现：
+
+- 保存流程定义
+- 查询流程定义
+- 校验 DAG 是否有环
+
+---
+
+## 第三步：实现顺序执行引擎
+
+先不要并行。
+
+按照拓扑顺序执行节点。
+
+---
+
+## 第四步：实现 SSE 状态推送
+
+每个节点状态变化都推给前端。
+
+前端高亮当前节点。
+
+---
+
+## 第五步：实现断点
+
+节点命中断点后暂停。
+
+前端提供继续按钮。
+
+---
+
+## 第六步：实现数据源
+
+支持：
+
+- JSON 输入
+- Excel 输入
+- 上一节点输出
+
+---
+
+## 第七步：实现节点输入输出快照
+
+点击节点可以查看：
+
+- 输入
+- 输出
+- 日志
+- 错误
+
+---
+
+# 三十五、最终建议
+
+你的需求不要一开始就做复杂工作流引擎。
+
+推荐路线：
+
+```text
+Vue Flow 流程图编辑
+        ↓
+Spring Boot 3 提供流程保存和执行接口
+        ↓
+自研轻量 DAG 执行引擎
+        ↓
+NodeExecutor 扩展不同计算节点
+        ↓
+DataSourceResolver 扩展 JSON / Excel / DB / HTTP 数据源
+        ↓
+SSE 推送节点运行状态
+        ↓
+前端高亮当前节点、断点、输入输出查看
+```
+
+这套方案最贴合你的需求，也最容易落地。
+
+如果你愿意，我下一步可以继续帮你输出任意一种：
+
+1. **完整数据库表设计**
+2. **Spring Boot 3 后端项目骨架代码**
+3. **Vue3 + Vue Flow 前端画布代码**
+4. **断点调试执行引擎详细设计**
+5. **一套可直接运行的 MVP Demo 设计**
