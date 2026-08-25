@@ -1,0 +1,6660 @@
+### USER
+我有一个计算逻辑，需要很多步骤，我想可视化这些步骤，并且节点之间可以调整 ，每个节点都有输入数据，计算，输出数据等。节点输入数据可以来源不同比如上一个节点输出，json excel 等。可以多个节点输出作为一个节点输入，或者一个节点可以有多个输出 我用springboot 3 vue3 jdk21 。
+
+### ASSISTANT
+可以做，而且非常适合做成一个「可视化计算流程编排 / DAG 节点引擎」系统。
+
+你的需求本质上是一个：
+
+> 可视化节点编排系统 + 可执行计算流程引擎 + 多数据源输入输出 + 节点间数据传递
+
+技术栈用 **Spring Boot 3 + Vue3 + JDK21** 完全没问题，而且很合适。
+
+下面我给你一套比较完整的落地方案，包括：
+
+1. 整体架构
+2. 前端可视化方案
+3. 后端节点引擎设计
+4. 数据模型设计
+5. 节点输入输出设计
+6. 多输入 / 多输出怎么实现
+7. JSON / Excel 数据源怎么处理
+8. 执行流程设计
+9. 核心 Java 示例代码
+10. 前端 Vue3 示例思路
+11. 可调整节点、连线、布局怎么做
+12. 推荐的技术选型
+13. 最小可用版本 MVP 建议
+
+---
+
+# 一、整体架构设计
+
+你可以把系统拆成两部分：
+
+## 1. 前端可视化编辑器
+
+负责：
+
+- 展示节点
+- 拖拽节点
+- 连线
+- 配置节点参数
+- 查看输入数据
+- 查看输出数据
+- 执行流程
+- 显示执行状态
+
+建议使用：
+
+- Vue3
+- TypeScript
+- Pinia
+- Element Plus / Ant Design Vue
+- 图编辑库：
+  - Vue Flow
+  - AntV X6
+  - LogicFlow
+  - jsPlumb
+  - Rete.js
+
+其中我比较推荐：
+
+> **Vue Flow**：如果你想要轻量、现代、和 Vue3 集成好  
+> **AntV X6**：如果你想要功能强、企业级、扩展能力强  
+> **LogicFlow**：如果你偏业务流程、审批流、规则流
+
+你这个是计算流，我更推荐：
+
+- 小型项目：Vue Flow
+- 中大型项目：AntV X6
+
+---
+
+## 2. 后端计算引擎
+
+负责：
+
+- 保存流程图结构
+- 解析节点和连线
+- 校验 DAG 是否合法
+- 拓扑排序
+- 执行节点
+- 管理上下文数据
+- 处理数据源输入
+- 输出结果
+- 日志追踪
+- 错误处理
+
+后端核心概念：
+
+> 一个流程 = 一组节点 + 一组连线  
+> 每个节点 = 输入 + 计算逻辑 + 输出  
+> 节点之间通过连线传递数据
+
+---
+
+# 二、核心概念设计
+
+你可以把整个系统抽象成下面几个对象。
+
+## 1. 流程图 Flow
+
+表示一整个计算流程。
+
+```json
+{
+  "flowId": "flow_001",
+  "name": "销售计算流程",
+  "nodes": [],
+  "edges": []
+}
+```
+
+---
+
+## 2. 节点 Node
+
+每个节点表示一个计算步骤。
+
+```json
+{
+  "id": "node_1",
+  "type": "CALCULATE",
+  "name": "计算总价",
+  "config": {},
+  "inputs": [],
+  "outputs": []
+}
+```
+
+节点类型可以包括：
+
+| 节点类型 | 说明 |
+|---|---|
+| INPUT_JSON | JSON 输入 |
+| INPUT_EXCEL | Excel 输入 |
+| INPUT_MANUAL | 手工输入 |
+| INPUT_API | 接口输入 |
+| CALCULATE | 计算节点 |
+| SCRIPT | 脚本节点 |
+| FILTER | 过滤节点 |
+| MERGE | 合并节点 |
+| SPLIT | 拆分节点 |
+| OUTPUT | 输出节点 |
+| CONDITION | 条件节点 |
+
+---
+
+## 3. 连线 Edge
+
+表示节点之间的数据流向。
+
+```json
+{
+  "id": "edge_1",
+  "sourceNodeId": "node_1",
+  "sourcePort": "output_total",
+  "targetNodeId": "node_2",
+  "targetPort": "input_total"
+}
+```
+
+这里建议一定要引入「端口」概念。
+
+因为你有：
+
+- 一个节点多个输出
+- 一个节点多个输入
+- 多个节点输出作为同一个节点输入
+
+所以不能简单写成：
+
+```json
+sourceNodeId -> targetNodeId
+```
+
+而应该是：
+
+```text
+sourceNodeId.sourcePort -> targetNodeId.targetPort
+```
+
+---
+
+# 三、节点输入输出设计
+
+这是这个系统最关键的地方。
+
+建议你采用「端口 + Schema + 数据包」的设计。
+
+---
+
+## 1. 节点输入端口
+
+例如一个计算节点有：
+
+```json
+{
+  "inputPorts": [
+    {
+      "code": "price",
+      "name": "单价",
+      "dataType": "NUMBER",
+      "required": true
+    },
+    {
+      "code": "quantity",
+      "name": "数量",
+      "dataType": "NUMBER",
+      "required": true
+    }
+  ]
+}
+```
+
+---
+
+## 2. 节点输出端口
+
+```json
+{
+  "outputPorts": [
+    {
+      "code": "totalAmount",
+      "name": "总金额",
+      "dataType": "NUMBER"
+    },
+    {
+      "code": "detail",
+      "name": "计算明细",
+      "dataType": "OBJECT"
+    }
+  ]
+}
+```
+
+---
+
+## 3. 数据类型
+
+可以先支持这些类型：
+
+```text
+STRING
+NUMBER
+BOOLEAN
+DATE
+OBJECT
+ARRAY
+TABLE
+FILE
+```
+
+如果你的计算逻辑偏表格计算，可以增加：
+
+```text
+TABLE
+DATAFRAME
+LIST_OBJECT
+```
+
+---
+
+# 四、节点数据来源设计
+
+你说输入数据可以来自不同来源：
+
+- 上一个节点输出
+- JSON
+- Excel
+- 手工输入
+- 数据库
+- API
+
+所以节点输入不要只设计成「来自上一节点」，而是设计成「输入源类型」。
+
+---
+
+## 输入源类型
+
+```text
+UPSTREAM        来自上游节点输出
+JSON            固定 JSON 数据
+EXCEL           Excel 文件
+CSV             CSV 文件
+MANUAL          手工输入
+API             远程接口
+DATABASE        数据库
+EXPRESSION      表达式计算
+CONTEXT         全局上下文
+```
+
+示例：
+
+```json
+{
+  "inputCode": "salesData",
+  "sourceType": "EXCEL",
+  "config": {
+    "fileId": "file_001",
+    "sheetName": "Sheet1"
+  }
+}
+```
+
+或者：
+
+```json
+{
+  "inputCode": "discount",
+  "sourceType": "MANUAL",
+  "config": {
+    "value": 0.9
+  }
+}
+```
+
+或者：
+
+```json
+{
+  "inputCode": "totalAmount",
+  "sourceType": "UPSTREAM",
+  "config": {
+    "nodeId": "node_1",
+    "outputCode": "totalAmount"
+  }
+}
+```
+
+---
+
+# 五、多输入、多输出设计
+
+你的需求里有：
+
+> 多个节点输出作为一个节点输入
+
+这可以分成两种情况。
+
+---
+
+## 情况一：一个输入端口接收多个上游输出
+
+例如合并节点：
+
+```text
+节点A输出 -> 合并节点 inputs
+节点B输出 -> 合并节点 inputs
+节点C输出 -> 合并节点 inputs
+```
+
+这时目标节点输入可以设计为数组：
+
+```json
+{
+  "inputCode": "dataList",
+  "multi": true,
+  "dataType": "ARRAY"
+}
+```
+
+运行时：
+
+```json
+{
+  "dataList": [
+    {
+      "fromNodeId": "node_a",
+      "value": {}
+    },
+    {
+      "fromNodeId": "node_b",
+      "value": {}
+    }
+  ]
+}
+```
+
+或者更简单：
+
+```json
+{
+  "dataList": [
+    {},
+    {},
+    {}
+  ]
+}
+```
+
+---
+
+## 情况二：一个节点有多个输入端口
+
+例如：
+
+```text
+订单节点 -> 订单数据
+库存节点 -> 库存数据
+价格节点 -> 价格数据
+```
+
+计算节点：
+
+```json
+{
+  "inputPorts": [
+    {
+      "code": "orderData",
+      "dataType": "OBJECT"
+    },
+    {
+      "code": "stockData",
+      "dataType": "OBJECT"
+    },
+    {
+      "code": "priceData",
+      "dataType": "OBJECT"
+    }
+  ]
+}
+```
+
+这种更常见，也更清晰。
+
+我建议你优先采用：
+
+> 一个节点有多个输入端口，而不是一个输入端口接收所有数据。
+
+如果确实需要聚合，再提供专门的 `MERGE` 节点。
+
+---
+
+## 多输出
+
+一个节点可以有多个输出端口。
+
+例如：
+
+```json
+{
+  "outputPorts": [
+    {
+      "code": "successData",
+      "name": "成功数据"
+    },
+    {
+      "code": "failedData",
+      "name": "失败数据"
+    },
+    {
+      "code": "summary",
+      "name": "汇总结果"
+    }
+  ]
+}
+```
+
+后续连线：
+
+```text
+node_1.successData -> node_2.input
+node_1.failedData -> node_3.input
+node_1.summary -> node_4.input
+```
+
+---
+
+# 六、流程执行引擎设计
+
+后端最重要的是执行引擎。
+
+你的流程本质上最好限制为 **DAG 有向无环图**。
+
+也就是：
+
+```text
+节点之间不能有循环依赖
+```
+
+如果允许循环，会复杂很多。建议第一版只做 DAG。
+
+---
+
+## 执行步骤
+
+```text
+1. 加载流程图
+2. 校验节点和连线
+3. 检查是否有环
+4. 拓扑排序
+5. 初始化执行上下文
+6. 按顺序执行节点
+7. 每个节点执行前解析输入
+8. 节点计算
+9. 节点输出写入上下文
+10. 记录执行日志
+11. 返回最终结果
+```
+
+---
+
+# 七、执行上下文 Context
+
+节点之间传递数据不要直接传，而是通过执行上下文。
+
+例如：
+
+```java
+Map<String, NodeOutput> executionContext
+```
+
+结构可以是：
+
+```json
+{
+  "node_1": {
+    "totalAmount": 1000,
+    "detail": {}
+  },
+  "node_2": {
+    "finalResult": 900
+  }
+}
+```
+
+这样后续节点可以通过：
+
+```text
+node_1.totalAmount
+```
+
+获取上游输出。
+
+---
+
+# 八、推荐数据模型
+
+你可以保存到 MySQL / PostgreSQL。
+
+---
+
+## 1. 流程表
+
+```sql
+create table flow_definition
+(
+    id          bigint primary key auto_increment,
+    flow_code   varchar(64) not null,
+    flow_name   varchar(128) not null,
+    status      varchar(32) not null,
+    content     json,
+    create_time datetime,
+    update_time datetime
+);
+```
+
+`content` 里面可以直接保存前端画布 JSON。
+
+例如：
+
+```json
+{
+  "nodes": [],
+  "edges": [],
+  "viewport": {}
+}
+```
+
+---
+
+## 2. 节点定义表
+
+如果你想把节点做成可配置、可复用，可以拆表。
+
+```sql
+create table node_definition
+(
+    id           bigint primary key auto_increment,
+    node_code    varchar(64) not null,
+    node_name    varchar(128) not null,
+    node_type    varchar(64) not null,
+    config_schema json,
+    input_schema  json,
+    output_schema json,
+    description  varchar(512)
+);
+```
+
+---
+
+## 3. 流程实例表
+
+每次运行生成一个实例。
+
+```sql
+create table flow_execution
+(
+    id           bigint primary key auto_increment,
+    flow_code    varchar(64) not null,
+    status       varchar(32) not null,
+    start_time   datetime,
+    end_time     datetime,
+    error_msg    text
+);
+```
+
+---
+
+## 4. 节点执行记录表
+
+```sql
+create table node_execution
+(
+    id              bigint primary key auto_increment,
+    execution_id    bigint not null,
+    node_id         varchar(64) not null,
+    status          varchar(32) not null,
+    input_data      json,
+    output_data     json,
+    error_msg       text,
+    start_time      datetime,
+    end_time        datetime
+);
+```
+
+这个非常重要。
+
+因为你后面要做：
+
+- 节点执行状态
+- 每个节点输入输出查看
+- 调试
+- 日志
+- 重试
+- 断点执行
+
+都依赖这张表。
+
+---
+
+# 九、后端核心接口设计
+
+## 1. 流程管理接口
+
+```text
+POST   /api/flows
+GET    /api/flows
+GET    /api/flows/{flowId}
+PUT    /api/flows/{flowId}
+DELETE /api/flows/{flowId}
+```
+
+保存流程结构示例：
+
+```json
+{
+  "name": "计算流程",
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "INPUT_EXCEL",
+      "name": "读取销售数据",
+      "position": {
+        "x": 100,
+        "y": 200
+      },
+      "config": {
+        "fileId": "file_001",
+        "sheetName": "Sheet1"
+      },
+      "inputPorts": [],
+      "outputPorts": [
+        {
+          "code": "data",
+          "name": "表格数据",
+          "dataType": "TABLE"
+        }
+      ]
+    },
+    {
+      "id": "node_2",
+      "type": "CALCULATE",
+      "name": "计算总销售额",
+      "position": {
+        "x": 400,
+        "y": 200
+      },
+      "config": {
+        "expression": "SUM(data.amount)"
+      },
+      "inputPorts": [
+        {
+          "code": "data",
+          "name": "销售数据",
+          "dataType": "TABLE"
+        }
+      ],
+      "outputPorts": [
+        {
+          "code": "totalAmount",
+          "name": "总金额",
+          "dataType": "NUMBER"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_1",
+      "sourceNodeId": "node_1",
+      "sourcePort": "data",
+      "targetNodeId": "node_2",
+      "targetPort": "data"
+    }
+  ]
+}
+```
+
+---
+
+## 2. 执行接口
+
+```text
+POST /api/flows/{flowId}/execute
+```
+
+返回：
+
+```json
+{
+  "executionId": "exec_001",
+  "status": "RUNNING"
+}
+```
+
+---
+
+## 3. 查询执行结果
+
+```text
+GET /api/executions/{executionId}
+```
+
+返回：
+
+```json
+{
+  "executionId": "exec_001",
+  "status": "SUCCESS",
+  "nodeResults": [
+    {
+      "nodeId": "node_1",
+      "status": "SUCCESS",
+      "output": {
+        "data": []
+      }
+    },
+    {
+      "nodeId": "node_2",
+      "status": "SUCCESS",
+      "output": {
+        "totalAmount": 10000
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 4. 节点调试接口
+
+```text
+POST /api/flows/{flowId}/nodes/{nodeId}/test
+```
+
+用于只测试单个节点。
+
+---
+
+# 十、Spring Boot 3 后端架构
+
+建议分层：
+
+```text
+controller       控制器
+application      应用服务
+domain           领域模型
+engine           执行引擎
+connector        数据源连接器
+executor         节点执行器
+repository       数据库访问
+```
+
+核心包结构：
+
+```text
+com.xxx.flow
+├── controller
+├── service
+├── engine
+├── model
+├── executor
+├── connector
+├── parser
+├── repository
+└── config
+```
+
+---
+
+# 十一、核心 Java 模型设计
+
+下面给你一套 JDK21 + Spring Boot 3 风格的代码设计。
+
+---
+
+## 1. 流程图模型
+
+```java
+public record FlowDefinition(
+        String flowId,
+        String name,
+        List<NodeDefinition> nodes,
+        List<EdgeDefinition> edges
+) {
+}
+```
+
+---
+
+## 2. 节点模型
+
+```java
+public record NodeDefinition(
+        String id,
+        String type,
+        String name,
+        Map<String, Object> config,
+        List<InputPort> inputPorts,
+        List<OutputPort> outputPorts
+) {
+}
+```
+
+---
+
+## 3. 端口模型
+
+```java
+public record InputPort(
+        String code,
+        String name,
+        String dataType,
+        boolean required,
+        boolean multi
+) {
+}
+```
+
+```java
+public record OutputPort(
+        String code,
+        String name,
+        String dataType
+) {
+}
+```
+
+---
+
+## 4. 连线模型
+
+```java
+public record EdgeDefinition(
+        String id,
+        String sourceNodeId,
+        String sourcePort,
+        String targetNodeId,
+        String targetPort
+) {
+}
+```
+
+---
+
+# 十二、节点执行器设计
+
+这里强烈建议用策略模式。
+
+每种节点类型对应一个执行器。
+
+---
+
+## 1. 节点执行接口
+
+```java
+public interface NodeExecutor {
+
+    String supportType();
+
+    NodeResult execute(NodeExecutionContext context);
+}
+```
+
+---
+
+## 2. 节点执行上下文
+
+```java
+public class NodeExecutionContext {
+
+    private final String executionId;
+    private final NodeDefinition node;
+    private final Map<String, Object> inputs;
+    private final Map<String, Object> globalContext;
+
+    public NodeExecutionContext(
+            String executionId,
+            NodeDefinition node,
+            Map<String, Object> inputs,
+            Map<String, Object> globalContext
+    ) {
+        this.executionId = executionId;
+        this.node = node;
+        this.inputs = inputs;
+        this.globalContext = globalContext;
+    }
+
+    public String getExecutionId() {
+        return executionId;
+    }
+
+    public NodeDefinition getNode() {
+        return node;
+    }
+
+    public Map<String, Object> getInputs() {
+        return inputs;
+    }
+
+    public Map<String, Object> getGlobalContext() {
+        return globalContext;
+    }
+}
+```
+
+---
+
+## 3. 节点执行结果
+
+```java
+public record NodeResult(
+        NodeStatus status,
+        Map<String, Object> outputs,
+        String errorMessage
+) {
+
+    public static NodeResult success(Map<String, Object> outputs) {
+        return new NodeResult(NodeStatus.SUCCESS, outputs, null);
+    }
+
+    public static NodeResult fail(String errorMessage) {
+        return new NodeResult(NodeStatus.FAILED, Map.of(), errorMessage);
+    }
+}
+```
+
+```java
+public enum NodeStatus {
+    PENDING,
+    RUNNING,
+    SUCCESS,
+    FAILED,
+    SKIPPED
+}
+```
+
+---
+
+# 十三、节点执行器示例
+
+## 1. 计算节点执行器
+
+```java
+@Component
+public class CalculateNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "CALCULATE";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+            Object price = context.getInputs().get("price");
+            Object quantity = context.getInputs().get("quantity");
+
+            double p = Double.parseDouble(price.toString());
+            double q = Double.parseDouble(quantity.toString());
+
+            double total = p * q;
+
+            Map<String, Object> outputs = new HashMap<>();
+            outputs.put("totalAmount", total);
+
+            return NodeResult.success(outputs);
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+}
+```
+
+---
+
+## 2. JSON 输入节点
+
+```java
+@Component
+public class JsonInputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "INPUT_JSON";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        Object json = context.getNode().config().get("json");
+
+        Map<String, Object> outputs = new HashMap<>();
+        outputs.put("data", json);
+
+        return NodeResult.success(outputs);
+    }
+}
+```
+
+---
+
+## 3. Excel 输入节点
+
+Excel 推荐：
+
+- Apache POI
+- EasyExcel
+
+如果你偏业务系统，EasyExcel 更简单。
+
+这里用 EasyExcel 举例。
+
+```java
+@Component
+public class ExcelInputNodeExecutor implements NodeExecutor {
+
+    private final ExcelService excelService;
+
+    public ExcelInputNodeExecutor(ExcelService excelService) {
+        this.excelService = excelService;
+    }
+
+    @Override
+    public String supportType() {
+        return "INPUT_EXCEL";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+            String fileId = (String) context.getNode().config().get("fileId");
+            String sheetName = (String) context.getNode().config().get("sheetName");
+
+            List<Map<String, Object>> rows = excelService.readExcel(fileId, sheetName);
+
+            Map<String, Object> outputs = new HashMap<>();
+            outputs.put("data", rows);
+
+            return NodeResult.success(outputs);
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+}
+```
+
+---
+
+# 十四、流程执行引擎核心代码
+
+---
+
+## 1. 执行引擎接口
+
+```java
+public interface FlowEngine {
+
+    FlowExecutionResult execute(FlowDefinition flow);
+}
+```
+
+---
+
+## 2. 执行结果
+
+```java
+public record FlowExecutionResult(
+        String executionId,
+        FlowStatus status,
+        Map<String, NodeResult> nodeResults,
+        String errorMessage
+) {
+}
+```
+
+```java
+public enum FlowStatus {
+    RUNNING,
+    SUCCESS,
+    FAILED
+}
+```
+
+---
+
+## 3. 简单执行引擎实现
+
+```java
+@Service
+public class DefaultFlowEngine implements FlowEngine {
+
+    private final Map<String, NodeExecutor> executorMap = new HashMap<>();
+
+    public DefaultFlowEngine(List<NodeExecutor> executors) {
+        for (NodeExecutor executor : executors) {
+            executorMap.put(executor.supportType(), executor);
+        }
+    }
+
+    @Override
+    public FlowExecutionResult execute(FlowDefinition flow) {
+        String executionId = UUID.randomUUID().toString();
+
+        try {
+            List<NodeDefinition> sortedNodes = topologicalSort(flow);
+
+            Map<String, Map<String, Object>> context = new HashMap<>();
+            Map<String, NodeResult> nodeResults = new HashMap<>();
+
+            for (NodeDefinition node : sortedNodes) {
+                Map<String, Object> inputs = resolveInputs(flow, node, context);
+
+                NodeExecutionContext nodeContext = new NodeExecutionContext(
+                        executionId,
+                        node,
+                        inputs,
+                        Map.of()
+                );
+
+                NodeExecutor executor = executorMap.get(node.type());
+
+                if (executor == null) {
+                    throw new IllegalStateException("找不到节点执行器: " + node.type());
+                }
+
+                NodeResult result = executor.execute(nodeContext);
+                nodeResults.put(node.id(), result);
+
+                if (result.status() == NodeStatus.FAILED) {
+                    return new FlowExecutionResult(
+                            executionId,
+                            FlowStatus.FAILED,
+                            nodeResults,
+                            result.errorMessage()
+                    );
+                }
+
+                context.put(node.id(), result.outputs());
+            }
+
+            return new FlowExecutionResult(
+                    executionId,
+                    FlowStatus.SUCCESS,
+                    nodeResults,
+                    null
+            );
+
+        } catch (Exception e) {
+            return new FlowExecutionResult(
+                    executionId,
+                    FlowStatus.FAILED,
+                    Map.of(),
+                    e.getMessage()
+            );
+        }
+    }
+}
+```
+
+---
+
+# 十五、输入解析逻辑
+
+这里处理「节点输入来自哪里」。
+
+---
+
+## 输入解析逻辑
+
+```java
+private Map<String, Object> resolveInputs(
+        FlowDefinition flow,
+        NodeDefinition node,
+        Map<String, Map<String, Object>> context
+) {
+    Map<String, Object> inputs = new HashMap<>();
+
+    for (EdgeDefinition edge : flow.edges()) {
+        if (edge.targetNodeId().equals(node.id())) {
+            String sourceNodeId = edge.sourceNodeId();
+            String sourcePort = edge.sourcePort();
+            String targetPort = edge.targetPort();
+
+            Map<String, Object> sourceOutputs = context.get(sourceNodeId);
+
+            if (sourceOutputs != null) {
+                Object value = sourceOutputs.get(sourcePort);
+
+                InputPort inputPort = node.inputPorts()
+                        .stream()
+                        .filter(x -> x.code().equals(targetPort))
+                        .findFirst()
+                        .orElse(null);
+
+                if (inputPort != null && inputPort.multi()) {
+                    Object current = inputs.get(targetPort);
+
+                    List<Object> list;
+
+                    if (current instanceof List) {
+                        list = (List<Object>) current;
+                    } else {
+                        list = new ArrayList<>();
+                    }
+
+                    list.add(value);
+                    inputs.put(targetPort, list);
+                } else {
+                    inputs.put(targetPort, value);
+                }
+            }
+        }
+    }
+
+    return inputs;
+}
+```
+
+这样你就可以支持：
+
+```text
+一个输入端口接收单个值
+一个输入端口接收多个值
+多个上游节点输出给同一个节点
+```
+
+---
+
+# 十六、拓扑排序实现
+
+DAG 执行必须做拓扑排序。
+
+简单实现：
+
+```java
+private List<NodeDefinition> topologicalSort(FlowDefinition flow) {
+    Map<String, Integer> inDegree = new HashMap<>();
+    Map<String, List<String>> graph = new HashMap<>();
+    Map<String, NodeDefinition> nodeMap = new HashMap<>();
+
+    for (NodeDefinition node : flow.nodes()) {
+        nodeMap.put(node.id(), node);
+        inDegree.put(node.id(), 0);
+        graph.put(node.id(), new ArrayList<>());
+    }
+
+    for (EdgeDefinition edge : flow.edges()) {
+        graph.get(edge.sourceNodeId()).add(edge.targetNodeId());
+        inDegree.put(
+                edge.targetNodeId(),
+                inDegree.get(edge.targetNodeId()) + 1
+        );
+    }
+
+    Queue<String> queue = new LinkedList<>();
+
+    for (Map.Entry<String, Integer> entry : inDegree.entrySet()) {
+        if (entry.getValue() == 0) {
+            queue.offer(entry.getKey());
+        }
+    }
+
+    List<NodeDefinition> result = new ArrayList<>();
+
+    while (!queue.isEmpty()) {
+        String nodeId = queue.poll();
+        result.add(nodeMap.get(nodeId));
+
+        for (String next : graph.get(nodeId)) {
+            inDegree.put(next, inDegree.get(next) - 1);
+
+            if (inDegree.get(next) == 0) {
+                queue.offer(next);
+            }
+        }
+    }
+
+    if (result.size() != flow.nodes().size()) {
+        throw new IllegalStateException("流程存在循环依赖");
+    }
+
+    return result;
+}
+```
+
+---
+
+# 十七、前端 Vue3 可视化方案
+
+前端要做的事情：
+
+## 1. 画布
+
+展示节点、连线。
+
+## 2. 节点拖拽
+
+从左侧组件库拖节点到画布。
+
+## 3. 节点配置
+
+点击节点后右侧显示配置面板。
+
+## 4. 端口连线
+
+节点左右两侧有输入输出点。
+
+## 5. 执行状态
+
+节点颜色变化：
+
+| 状态 | 颜色 |
+|---|---|
+| 未执行 | 灰色 |
+| 执行中 | 蓝色 |
+| 成功 | 绿色 |
+| 失败 | 红色 |
+
+## 6. 查看节点输入输出
+
+点击节点后显示：
+
+```json
+{
+  "input": {},
+  "output": {}
+}
+```
+
+---
+
+# 十八、前端技术选型推荐
+
+## 方案一：轻量现代
+
+```text
+Vue3
+TypeScript
+Pinia
+Vue Flow
+Element Plus
+Axios
+```
+
+适合：
+
+- 快速开发
+- 界面现代
+- 中小项目
+
+---
+
+## 方案二：企业级
+
+```text
+Vue3
+TypeScript
+Pinia
+AntV X6
+Ant Design Vue
+Axios
+```
+
+适合：
+
+- 节点复杂
+- 自定义能力强
+- 企业级流程编排
+
+---
+
+## 方案三：偏业务流程
+
+```text
+Vue3
+LogicFlow
+Element Plus
+```
+
+适合：
+
+- 审批流
+- 业务流
+- 简单计算流
+
+---
+
+# 十九、Vue Flow 简单示例
+
+安装：
+
+```bash
+npm install @vue-flow/core
+npm install @vue-flow/background
+npm install @vue-flow/controls
+npm install @vue-flow/minimap
+```
+
+示例：
+
+```vue
+<script setup lang="ts">
+import { VueFlow } from '@vue-flow/core'
+import { Background } from '@vue-flow/background'
+import { Controls } from '@vue-flow/controls'
+import { MiniMap } from '@vue-flow/minimap'
+
+const nodes = ref([
+  {
+    id: 'node_1',
+    type: 'input',
+    position: { x: 100, y: 100 },
+    data: {
+      label: 'Excel 输入'
+    }
+  },
+  {
+    id: 'node_2',
+    position: { x: 400, y: 100 },
+    data: {
+      label: '计算总价'
+    }
+  }
+])
+
+const edges = ref([
+  {
+    id: 'edge_1',
+    source: 'node_1',
+    target: 'node_2'
+  }
+])
+</script>
+
+<template>
+  <div style="height: 800px">
+    <VueFlow :nodes="nodes" :edges="edges">
+      <Background />
+      <Controls />
+      <MiniMap />
+    </VueFlow>
+  </div>
+</template>
+```
+
+---
+
+# 二十、自定义节点
+
+真实场景里一定要自定义节点。
+
+例如：
+
+```vue
+<script setup lang="ts">
+const props = defineProps({
+  data: Object
+})
+</script>
+
+<template>
+  <div class="custom-node">
+    <div class="title">
+      {{ data.label }}
+    </div>
+
+    <div class="ports">
+      <div class="inputs">
+        <div
+          v-for="input in data.inputPorts"
+          :key="input.code"
+          class="port"
+        >
+          {{ input.name }}
+        </div>
+      </div>
+
+      <div class="outputs">
+        <div
+          v-for="output in data.outputPorts"
+          :key="output.code"
+          class="port"
+        >
+          {{ output.name }}
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+```
+
+---
+
+# 二十一、前端保存给后端的数据结构
+
+前端画布最终应该保存类似这样：
+
+```json
+{
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "INPUT_EXCEL",
+      "name": "Excel 输入",
+      "position": {
+        "x": 100,
+        "y": 100
+      },
+      "config": {
+        "fileId": "file_001",
+        "sheetName": "Sheet1"
+      },
+      "inputPorts": [],
+      "outputPorts": [
+        {
+          "code": "data",
+          "name": "数据",
+          "dataType": "TABLE"
+        }
+      ]
+    },
+    {
+      "id": "node_2",
+      "type": "CALCULATE",
+      "name": "计算节点",
+      "position": {
+        "x": 400,
+        "y": 100
+      },
+      "config": {
+        "expression": "SUM(data.amount)"
+      },
+      "inputPorts": [
+        {
+          "code": "data",
+          "name": "数据",
+          "dataType": "TABLE"
+        }
+      ],
+      "outputPorts": [
+        {
+          "code": "result",
+          "name": "结果",
+          "dataType": "NUMBER"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_1",
+      "sourceNodeId": "node_1",
+      "sourcePort": "data",
+      "targetNodeId": "node_2",
+      "targetPort": "data"
+    }
+  ]
+}
+```
+
+---
+
+# 二十二、Excel 输入怎么做
+
+你有几种方式。
+
+---
+
+## 方案一：上传文件，后端解析
+
+流程：
+
+```text
+前端上传 Excel
+后端保存文件
+生成 fileId
+节点配置里选择该文件
+执行时后端读取 Excel
+```
+
+优点：
+
+- 简单
+- 稳定
+- 适合大多数业务系统
+
+---
+
+## 方案二：前端解析，把数据传给后端
+
+流程：
+
+```text
+前端用 xlsx 解析
+把 JSON 数据传给后端
+后端直接计算
+```
+
+优点：
+
+- 前端体验好
+- 小文件方便
+
+缺点：
+
+- 大文件不适合
+- 浏览器性能有限
+
+---
+
+## 推荐
+
+第一版建议：
+
+> 前端上传文件，后端解析。
+
+---
+
+# 二十三、JSON 输入怎么做
+
+可以支持三种方式。
+
+## 1. 手工输入 JSON
+
+前端给一个 JSON 编辑器。
+
+比如：
+
+```json
+{
+  "orderId": "A001",
+  "amount": 100
+}
+```
+
+---
+
+## 2. 上传 JSON 文件
+
+后端读取文件。
+
+---
+
+## 3. 从接口获取
+
+节点类型：
+
+```text
+INPUT_API
+```
+
+配置：
+
+```json
+{
+  "url": "http://xxx/api/data",
+  "method": "GET"
+}
+```
+
+---
+
+# 二十四、计算节点怎么做
+
+计算节点是重点。
+
+你有几种实现方式。
+
+---
+
+## 方案一：固定逻辑节点
+
+比如：
+
+```text
+求和节点
+平均值节点
+最大值节点
+过滤节点
+分组节点
+关联节点
+加减乘除节点
+```
+
+优点：
+
+- 稳定
+- 性能好
+- 容易维护
+
+缺点：
+
+- 灵活性一般
+
+---
+
+## 方案二：表达式引擎
+
+使用：
+
+- Spring Expression Language
+- MVEL
+- Aviator
+- JEXL
+- QLExpress
+- GraalVM JavaScript
+
+例如：
+
+```text
+price * quantity * discount
+```
+
+或者：
+
+```text
+SUM(data.amount)
+```
+
+推荐：
+
+- 简单表达式：Spring EL / Aviator
+- 复杂函数：QLExpress / Aviator
+- 脚本能力：GraalVM JS
+
+---
+
+## 方案三：脚本节点
+
+支持：
+
+```text
+JavaScript
+Groovy
+Python
+```
+
+JDK21 下可以用：
+
+- GraalVM Polyglot
+- Groovy Script Engine
+
+但第一版不建议太复杂。
+
+---
+
+# 二十五、推荐计算表达式方案
+
+如果你的计算逻辑是业务规则类，我推荐：
+
+```text
+Aviator
+```
+
+或者：
+
+```text
+QLExpress
+```
+
+如果是简单字段计算：
+
+```text
+Spring EL
+```
+
+如果想做复杂脚本：
+
+```text
+GraalVM JavaScript
+```
+
+---
+
+# 二十六、节点配置 Schema 设计
+
+为了让前端动态渲染配置页面，建议节点定义里带 `configSchema`。
+
+例如：
+
+```json
+{
+  "nodeType": "INPUT_EXCEL",
+  "configSchema": [
+    {
+      "field": "fileId",
+      "label": "Excel 文件",
+      "type": "FILE_SELECT",
+      "required": true
+    },
+    {
+      "field": "sheetName",
+      "label": "Sheet 名称",
+      "type": "INPUT",
+      "required": false
+    }
+  ]
+}
+```
+
+前端根据这个自动生成表单。
+
+这样可以避免每个节点都写死页面。
+
+---
+
+# 二十七、执行状态可视化
+
+执行时建议后端返回节点状态。
+
+如果是同步执行：
+
+```json
+{
+  "executionId": "exec_001",
+  "status": "SUCCESS",
+  "nodeResults": {
+    "node_1": {
+      "status": "SUCCESS",
+      "outputs": {}
+    },
+    "node_2": {
+      "status": "SUCCESS",
+      "outputs": {}
+    }
+  }
+}
+```
+
+前端拿到后，把节点标绿或标红。
+
+---
+
+如果流程执行时间较长，建议异步执行。
+
+## 异步执行方案
+
+```text
+POST /api/flows/{flowId}/execute
+返回 executionId
+
+GET /api/executions/{executionId}/status
+轮询状态
+```
+
+或者用：
+
+- WebSocket
+- SSE
+
+推荐第二版加 SSE。
+
+---
+
+# 二十八、用 JDK21 可以做什么优化
+
+JDK21 可以用虚拟线程。
+
+适合节点中有大量 IO 的场景：
+
+- 读文件
+- 调接口
+- 查数据库
+
+例如：
+
+```java
+@Bean
+public TaskExecutor flowTaskExecutor() {
+    return new TaskExecutor() {
+        private final ExecutorService executorService =
+                Executors.newVirtualThreadPerTaskExecutor();
+
+        @Override
+        public void execute(Runnable task) {
+            executorService.execute(task);
+        }
+    };
+}
+```
+
+但注意：
+
+> 如果节点之间有强依赖，仍然要按拓扑顺序执行。  
+> 只有无依赖节点才可以并行执行。
+
+---
+
+# 二十九、并行执行设计
+
+当多个节点没有依赖关系时，可以并行执行。
+
+例如：
+
+```text
+节点A、节点B、节点C 都只依赖输入节点
+```
+
+可以并行。
+
+实现方式：
+
+```text
+按拓扑层级执行
+同一层级无依赖节点并行
+下一层级等待上一层级完成
+```
+
+示例：
+
+```text
+Level 1: 输入节点
+Level 2: 节点A、节点B、节点C
+Level 3: 汇总节点
+```
+
+第一版可以先串行执行。
+
+第二版再做并行。
+
+---
+
+# 三十、推荐 MVP 最小可用版本
+
+不要一开始做太复杂。
+
+建议你第一版只做这些。
+
+---
+
+## 前端
+
+支持：
+
+- 画布显示节点
+- 拖拽节点
+- 连线
+- 删除节点
+- 删除连线
+- 配置节点参数
+- 保存流程
+- 执行流程
+- 显示执行结果
+
+---
+
+## 后端
+
+支持节点：
+
+```text
+INPUT_JSON
+INPUT_MANUAL
+CALCULATE
+OUTPUT
+```
+
+先不要做 Excel。
+
+等流程跑通后，再加：
+
+```text
+INPUT_EXCEL
+MERGE
+SPLIT
+CONDITION
+```
+
+---
+
+## 数据结构
+
+先支持：
+
+```text
+单输入
+单输出
+简单连线
+```
+
+然后扩展：
+
+```text
+多输入
+多输出
+多输入聚合
+```
+
+---
+
+# 三十一、推荐分期实现路线
+
+---
+
+## 第一阶段：可视化画布
+
+目标：
+
+- 可以拖节点
+- 可以连线
+- 可以保存图
+
+技术：
+
+- Vue3
+- Vue Flow 或 X6
+- Spring Boot 保存 JSON
+
+---
+
+## 第二阶段：简单执行引擎
+
+目标：
+
+- 后端能读取流程图
+- 拓扑排序
+- 顺序执行节点
+
+节点：
+
+```text
+INPUT_MANUAL
+CALCULATE
+OUTPUT
+```
+
+---
+
+## 第三阶段：多输入多输出
+
+目标：
+
+- 支持端口
+- 支持多个输入
+- 支持多个输出
+- 支持上游输出作为下游输入
+
+---
+
+## 第四阶段：数据源节点
+
+目标：
+
+- 支持 JSON 输入
+- 支持 Excel 输入
+- 支持文件上传
+- 支持 API 输入
+
+---
+
+## 第五阶段：执行监控
+
+目标：
+
+- 节点执行状态
+- 输入输出查看
+- 错误提示
+- 日志记录
+- 单节点调试
+
+---
+
+## 第六阶段：高级能力
+
+目标：
+
+- 并行执行
+- 条件分支
+- 子流程
+- 定时任务
+- 流程版本
+- 权限管理
+- 审计日志
+
+---
+
+# 三十二、我比较推荐的技术组合
+
+如果你问我实际落地推荐，我会给你两套方案。
+
+---
+
+## 方案 A：快速落地型
+
+```text
+前端：
+Vue3
+TypeScript
+Pinia
+Vue Flow
+Element Plus
+Axios
+
+后端：
+Spring Boot 3
+JDK21
+Spring Web
+Spring Data JPA / MyBatis Plus
+MySQL
+Jackson
+EasyExcel
+Aviator
+```
+
+适合：
+
+- 内部系统
+- 业务计算流
+- 数据编排
+- 快速上线
+
+---
+
+## 方案 B：企业级复杂型
+
+```text
+前端：
+Vue3
+TypeScript
+Pinia
+AntV X6
+Ant Design Vue
+Axios
+
+后端：
+Spring Boot 3
+JDK21
+Spring Web
+MyBatis Plus
+MySQL / PostgreSQL
+Jackson
+EasyExcel
+Aviator / QLExpress
+GraalVM JS
+Redis
+WebSocket / SSE
+```
+
+适合：
+
+- 大型企业系统
+- 复杂节点
+- 高扩展
+- 可配置流程平台
+
+---
+
+# 三十三、核心设计原则
+
+最后给你几个非常重要的设计原则。
+
+---
+
+## 1. 一定用「端口」而不是简单节点连线
+
+错误设计：
+
+```text
+nodeA -> nodeB
+```
+
+推荐设计：
+
+```text
+nodeA.output1 -> nodeB.input1
+```
+
+因为你有多输入多输出。
+
+---
+
+## 2. 节点执行结果统一放上下文
+
+不要节点之间直接调用。
+
+推荐：
+
+```text
+节点输出 -> 执行上下文 -> 下游节点读取
+```
+
+---
+
+## 3. 每种节点一个执行器
+
+不要用大量 `if/else`。
+
+推荐：
+
+```java
+NodeExecutor
+```
+
+然后：
+
+```java
+INPUT_JSON -> JsonInputNodeExecutor
+INPUT_EXCEL -> ExcelInputNodeExecutor
+CALCULATE -> CalculateNodeExecutor
+```
+
+---
+
+## 4. 前端画布和后端执行模型分离
+
+前端保存的是画布结构：
+
+```json
+position
+viewport
+style
+```
+
+后端执行需要领域模型：
+
+```json
+nodes
+edges
+ports
+config
+dependencies
+```
+
+最好中间做一层转换。
+
+---
+
+## 5. 第一版不要支持循环
+
+先做 DAG。
+
+不要一上来支持：
+
+```text
+循环
+条件回退
+复杂分支
+子流程
+```
+
+否则复杂度会暴涨。
+
+---
+
+# 三十四、一个完整示例流程
+
+例如你的业务是：
+
+```text
+Excel 销售数据
++
+手动折扣率
+=>
+计算折后金额
+=>
+输出结果
+```
+
+流程：
+
+```text
+INPUT_EXCEL -> CALCULATE
+INPUT_MANUAL -> CALCULATE
+CALCULATE -> OUTPUT
+```
+
+节点：
+
+## 节点1：Excel 输入
+
+```json
+{
+  "id": "node_excel",
+  "type": "INPUT_EXCEL",
+  "outputPorts": [
+    {
+      "code": "salesData",
+      "name": "销售数据",
+      "dataType": "TABLE"
+    }
+  ]
+}
+```
+
+---
+
+## 节点2：手动输入
+
+```json
+{
+  "id": "node_discount",
+  "type": "INPUT_MANUAL",
+  "outputPorts": [
+    {
+      "code": "discount",
+      "name": "折扣率",
+      "dataType": "NUMBER"
+    }
+  ]
+}
+```
+
+---
+
+## 节点3：计算节点
+
+```json
+{
+  "id": "node_calc",
+  "type": "CALCULATE",
+  "inputPorts": [
+    {
+      "code": "salesData",
+      "name": "销售数据",
+      "dataType": "TABLE"
+    },
+    {
+      "code": "discount",
+      "name": "折扣率",
+      "dataType": "NUMBER"
+    }
+  ],
+  "outputPorts": [
+    {
+      "code": "finalAmount",
+      "name": "折后金额",
+      "dataType": "NUMBER"
+    }
+  ]
+}
+```
+
+---
+
+## 连线
+
+```json
+[
+  {
+    "id": "edge_1",
+    "sourceNodeId": "node_excel",
+    "sourcePort": "salesData",
+    "targetNodeId": "node_calc",
+    "targetPort": "salesData"
+  },
+  {
+    "id": "edge_2",
+    "sourceNodeId": "node_discount",
+    "sourcePort": "discount",
+    "targetNodeId": "node_calc",
+    "targetPort": "discount"
+  }
+]
+```
+
+---
+
+# 三十五、总结：你应该怎么做
+
+你的系统可以按这个方向做：
+
+```text
+前端：
+Vue3 + 可视化图编辑器
+负责拖拽、连线、配置节点、展示执行状态
+
+后端：
+Spring Boot 3 + 自研轻量流程执行引擎
+负责解析 DAG、拓扑排序、执行节点、管理上下文
+
+核心模型：
+Flow
+Node
+Edge
+InputPort
+OutputPort
+ExecutionContext
+NodeExecutor
+
+数据来源：
+UPSTREAM
+JSON
+EXCEL
+MANUAL
+API
+
+执行方式：
+DAG 拓扑排序执行
+```
+
+---
+
+如果你愿意，我下一步可以直接帮你输出一套「可运行的最小示例」，包括：
+
+1. **Spring Boot 3 后端代码结构**
+2. **Vue3 前端画布代码**
+3. **节点、连线、执行的完整 Demo**
+4. **支持 JSON 输入、手动输入、计算节点**
+5. **后续再扩展 Excel 和多输入多输出**
+
+如果你想要，我可以直接给你一份：
+
+> **Spring Boot 3 + Vue3 可视化计算节点编排 Demo 源码方案**。
+
+### USER
+生成一份可运行最小示例完整的demo源码方案。
+
+### ASSISTANT
+下面给你一份**可运行的最小完整 Demo 方案**，基于：
+
+- **Spring Boot 3**
+- **JDK 21**
+- **Vue3**
+- **Vue Flow**
+- **Maven**
+- **Vite**
+
+这个 Demo 实现：
+
+- 可视化节点画布
+- 节点可拖动
+- 节点之间可连线
+- 支持多个输入端口 / 多个输出端口
+- 支持手工输入数据
+- 支持 JSON 输入数据
+- 支持计算节点
+- 支持输出节点
+- 后端按 DAG 拓扑排序执行
+- 每个节点执行后返回输入输出结果
+- 前端显示执行状态和输出结果
+
+---
+
+# 一、项目结构
+
+```text
+flow-demo
+├── backend
+│   ├── pom.xml
+│   └── src
+│       └── main
+│           ├── java
+│           │   └── com
+│           │       └── example
+│           │           └── flowdemo
+│           │               ├── DemoApplication.java
+│           │               ├── config
+│           │               │   └── WebConfig.java
+│           │               ├── controller
+│           │               │   └── FlowController.java
+│           │               ├── engine
+│           │               │   ├── DefaultFlowEngine.java
+│           │               │   ├── FlowEngine.java
+│           │               │   ├── NodeExecutionContext.java
+│           │               │   └── NodeExecutor.java
+│           │               ├── executor
+│           │               │   ├── CalculateNodeExecutor.java
+│           │               │   ├── JsonInputNodeExecutor.java
+│           │               │   ├── ManualInputNodeExecutor.java
+│           │               │   └── OutputNodeExecutor.java
+│           │               └── model
+│           │                   ├── EdgeDefinition.java
+│           │                   ├── FlowDefinition.java
+│           │                   ├── FlowExecutionResult.java
+│           │                   ├── FlowStatus.java
+│           │                   ├── InputPort.java
+│           │                   ├── NodeDefinition.java
+│           │                   ├── NodeResult.java
+│           │                   ├── NodeStatus.java
+│           │                   └── OutputPort.java
+│           └── resources
+│               └── application.yml
+│
+└── frontend
+    ├── index.html
+    ├── package.json
+    ├── vite.config.js
+    └── src
+        ├── main.js
+        ├── App.vue
+        └── components
+            └── FlowNode.vue
+```
+
+---
+
+# 二、后端代码
+
+---
+
+## 1. `backend/pom.xml`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>flow-demo-backend</artifactId>
+    <version>0.0.1</version>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
+```
+
+---
+
+## 2. `backend/src/main/resources/application.yml`
+
+```yaml
+server:
+  port: 8080
+
+spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: false
+```
+
+---
+
+## 3. `DemoApplication.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/DemoApplication.java
+```
+
+```java
+package com.example.flowdemo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+```
+
+---
+
+## 4. `WebConfig.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/config/WebConfig.java
+```
+
+```java
+package com.example.flowdemo.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/api/**")
+                .allowedOrigins("http://localhost:5173")
+                .allowedMethods("*")
+                .allowedHeaders("*");
+    }
+}
+```
+
+---
+
+# 三、后端模型 Model
+
+---
+
+## 1. `FlowDefinition.java`
+
+```java
+package com.example.flowdemo.model;
+
+import java.util.List;
+
+public record FlowDefinition(
+        String flowId,
+        String name,
+        List<NodeDefinition> nodes,
+        List<EdgeDefinition> edges
+) {
+}
+```
+
+---
+
+## 2. `NodeDefinition.java`
+
+```java
+package com.example.flowdemo.model;
+
+import java.util.List;
+import java.util.Map;
+
+public record NodeDefinition(
+        String id,
+        String type,
+        String name,
+        Map<String, Object> position,
+        Map<String, Object> config,
+        List<InputPort> inputPorts,
+        List<OutputPort> outputPorts
+) {
+}
+```
+
+---
+
+## 3. `EdgeDefinition.java`
+
+```java
+package com.example.flowdemo.model;
+
+public record EdgeDefinition(
+        String id,
+        String sourceNodeId,
+        String sourcePort,
+        String targetNodeId,
+        String targetPort
+) {
+}
+```
+
+---
+
+## 4. `InputPort.java`
+
+```java
+package com.example.flowdemo.model;
+
+public record InputPort(
+        String code,
+        String name,
+        String dataType,
+        boolean required,
+        boolean multi
+) {
+}
+```
+
+---
+
+## 5. `OutputPort.java`
+
+```java
+package com.example.flowdemo.model;
+
+public record OutputPort(
+        String code,
+        String name,
+        String dataType
+) {
+}
+```
+
+---
+
+## 6. `NodeStatus.java`
+
+```java
+package com.example.flowdemo.model;
+
+public enum NodeStatus {
+    PENDING,
+    RUNNING,
+    SUCCESS,
+    FAILED,
+    SKIPPED
+}
+```
+
+---
+
+## 7. `FlowStatus.java`
+
+```java
+package com.example.flowdemo.model;
+
+public enum FlowStatus {
+    RUNNING,
+    SUCCESS,
+    FAILED
+}
+```
+
+---
+
+## 8. `NodeResult.java`
+
+```java
+package com.example.flowdemo.model;
+
+import java.util.Map;
+
+public record NodeResult(
+        NodeStatus status,
+        Map<String, Object> outputs,
+        String errorMessage
+) {
+
+    public static NodeResult success(Map<String, Object> outputs) {
+        return new NodeResult(NodeStatus.SUCCESS, outputs, null);
+    }
+
+    public static NodeResult fail(String errorMessage) {
+        return new NodeResult(NodeStatus.FAILED, Map.of(), errorMessage);
+    }
+}
+```
+
+---
+
+## 9. `FlowExecutionResult.java`
+
+```java
+package com.example.flowdemo.model;
+
+import java.util.Map;
+
+public record FlowExecutionResult(
+        String executionId,
+        FlowStatus status,
+        Map<String, NodeResult> nodeResults,
+        String errorMessage
+) {
+}
+```
+
+---
+
+# 四、执行引擎 Engine
+
+---
+
+## 1. `FlowEngine.java`
+
+```java
+package com.example.flowdemo.engine;
+
+import com.example.flowdemo.model.FlowDefinition;
+import com.example.flowdemo.model.FlowExecutionResult;
+
+public interface FlowEngine {
+
+    FlowExecutionResult execute(FlowDefinition flow);
+}
+```
+
+---
+
+## 2. `NodeExecutor.java`
+
+```java
+package com.example.flowdemo.engine;
+
+import com.example.flowdemo.model.NodeResult;
+
+public interface NodeExecutor {
+
+    String supportType();
+
+    NodeResult execute(NodeExecutionContext context);
+}
+```
+
+---
+
+## 3. `NodeExecutionContext.java`
+
+```java
+package com.example.flowdemo.engine;
+
+import com.example.flowdemo.model.NodeDefinition;
+
+import java.util.Map;
+
+public record NodeExecutionContext(
+        String executionId,
+        NodeDefinition node,
+        Map<String, Object> inputs,
+        Map<String, Object> globalContext
+) {
+}
+```
+
+---
+
+## 4. `DefaultFlowEngine.java`
+
+这是核心执行引擎。
+
+它负责：
+
+- 拓扑排序
+- 按顺序执行节点
+- 解析上游节点输出
+- 将结果写入上下文
+- 返回每个节点执行结果
+
+```java
+package com.example.flowdemo.engine;
+
+import com.example.flowdemo.model.EdgeDefinition;
+import com.example.flowdemo.model.FlowDefinition;
+import com.example.flowdemo.model.FlowExecutionResult;
+import com.example.flowdemo.model.FlowStatus;
+import com.example.flowdemo.model.InputPort;
+import com.example.flowdemo.model.NodeDefinition;
+import com.example.flowdemo.model.NodeResult;
+import com.example.flowdemo.model.NodeStatus;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.UUID;
+
+@Service
+public class DefaultFlowEngine implements FlowEngine {
+
+    private final Map<String, NodeExecutor> executorMap = new HashMap<>();
+
+    public DefaultFlowEngine(List<NodeExecutor> executors) {
+        for (NodeExecutor executor : executors) {
+            executorMap.put(executor.supportType(), executor);
+        }
+    }
+
+    @Override
+    public FlowExecutionResult execute(FlowDefinition flow) {
+        String executionId = UUID.randomUUID().toString();
+        Map<String, NodeResult> nodeResults = new LinkedHashMap<>();
+
+        try {
+            List<NodeDefinition> nodes = safeNodes(flow);
+            List<EdgeDefinition> edges = safeEdges(flow);
+
+            List<NodeDefinition> sortedNodes = topologicalSort(nodes, edges);
+
+            Map<String, Map<String, Object>> context = new HashMap<>();
+
+            for (NodeDefinition node : sortedNodes) {
+                NodeExecutor executor = executorMap.get(node.type());
+
+                if (executor == null) {
+                    throw new IllegalStateException("找不到节点执行器: " + node.type());
+                }
+
+                Map<String, Object> inputs = resolveInputs(node, edges, context);
+
+                NodeExecutionContext nodeContext = new NodeExecutionContext(
+                        executionId,
+                        node,
+                        inputs,
+                        Map.of()
+                );
+
+                NodeResult result = executor.execute(nodeContext);
+                nodeResults.put(node.id(), result);
+
+                if (result.status() != NodeStatus.SUCCESS) {
+                    return new FlowExecutionResult(
+                            executionId,
+                            FlowStatus.FAILED,
+                            nodeResults,
+                            result.errorMessage()
+                    );
+                }
+
+                context.put(
+                        node.id(),
+                        result.outputs() == null ? Map.of() : result.outputs()
+                );
+            }
+
+            return new FlowExecutionResult(
+                    executionId,
+                    FlowStatus.SUCCESS,
+                    nodeResults,
+                    null
+            );
+
+        } catch (Exception e) {
+            return new FlowExecutionResult(
+                    executionId,
+                    FlowStatus.FAILED,
+                    nodeResults,
+                    e.getMessage()
+            );
+        }
+    }
+
+    private List<NodeDefinition> safeNodes(FlowDefinition flow) {
+        return flow.nodes() == null ? List.of() : flow.nodes();
+    }
+
+    private List<EdgeDefinition> safeEdges(FlowDefinition flow) {
+        return flow.edges() == null ? List.of() : flow.edges();
+    }
+
+    private Map<String, Object> resolveInputs(
+            NodeDefinition node,
+            List<EdgeDefinition> edges,
+            Map<String, Map<String, Object>> context
+    ) {
+        Map<String, Object> inputs = new LinkedHashMap<>();
+
+        List<InputPort> inputPorts = node.inputPorts() == null
+                ? List.of()
+                : node.inputPorts();
+
+        Map<String, InputPort> inputPortMap = new HashMap<>();
+
+        for (InputPort port : inputPorts) {
+            inputPortMap.put(port.code(), port);
+        }
+
+        for (EdgeDefinition edge : edges) {
+            if (!Objects.equals(edge.targetNodeId(), node.id())) {
+                continue;
+            }
+
+            Map<String, Object> sourceOutputs = context.get(edge.sourceNodeId());
+
+            if (sourceOutputs == null) {
+                continue;
+            }
+
+            Object value = sourceOutputs.get(edge.sourcePort());
+            String targetPort = edge.targetPort();
+
+            if (targetPort == null) {
+                continue;
+            }
+
+            InputPort inputPort = inputPortMap.get(targetPort);
+            boolean multi = inputPort != null && inputPort.multi();
+
+            if (multi) {
+                Object current = inputs.get(targetPort);
+
+                List<Object> list = new ArrayList<>();
+
+                if (current instanceof List<?> currentList) {
+                    list.addAll(currentList);
+                } else if (current != null) {
+                    list.add(current);
+                }
+
+                list.add(value);
+
+                inputs.put(targetPort, list);
+            } else {
+                inputs.put(targetPort, value);
+            }
+        }
+
+        return inputs;
+    }
+
+    private List<NodeDefinition> topologicalSort(
+            List<NodeDefinition> nodes,
+            List<EdgeDefinition> edges
+    ) {
+        Map<String, NodeDefinition> nodeMap = new LinkedHashMap<>();
+        Map<String, Integer> inDegree = new LinkedHashMap<>();
+        Map<String, List<String>> graph = new LinkedHashMap<>();
+
+        for (NodeDefinition node : nodes) {
+            nodeMap.put(node.id(), node);
+            inDegree.put(node.id(), 0);
+            graph.put(node.id(), new ArrayList<>());
+        }
+
+        for (EdgeDefinition edge : edges) {
+            String source = edge.sourceNodeId();
+            String target = edge.targetNodeId();
+
+            if (!graph.containsKey(source) || !inDegree.containsKey(target)) {
+                continue;
+            }
+
+            graph.get(source).add(target);
+            inDegree.put(target, inDegree.get(target) + 1);
+        }
+
+        Queue<String> queue = new LinkedList<>();
+
+        for (Map.Entry<String, Integer> entry : inDegree.entrySet()) {
+            if (entry.getValue() == 0) {
+                queue.offer(entry.getKey());
+            }
+        }
+
+        List<NodeDefinition> sorted = new ArrayList<>();
+
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            sorted.add(nodeMap.get(current));
+
+            for (String next : graph.getOrDefault(current, List.of())) {
+                int degree = inDegree.get(next) - 1;
+                inDegree.put(next, degree);
+
+                if (degree == 0) {
+                    queue.offer(next);
+                }
+            }
+        }
+
+        if (sorted.size() != nodes.size()) {
+            throw new IllegalStateException("流程存在循环依赖");
+        }
+
+        return sorted;
+    }
+}
+```
+
+---
+
+# 五、节点执行器 Executor
+
+---
+
+## 1. `ManualInputNodeExecutor.java`
+
+手工输入节点。
+
+配置示例：
+
+```json
+{
+  "outputs": {
+    "price": 100
+  }
+}
+```
+
+输出：
+
+```json
+{
+  "price": 100
+}
+```
+
+```java
+package com.example.flowdemo.executor;
+
+import com.example.flowdemo.engine.NodeExecutionContext;
+import com.example.flowdemo.engine.NodeExecutor;
+import com.example.flowdemo.model.NodeDefinition;
+import com.example.flowdemo.model.NodeResult;
+import org.springframework.stereotype.Component;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Component
+public class ManualInputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "INPUT_MANUAL";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        NodeDefinition node = context.node();
+
+        Map<String, Object> outputs = buildOutputs(node);
+
+        return NodeResult.success(outputs);
+    }
+
+    private Map<String, Object> buildOutputs(NodeDefinition node) {
+        Map<String, Object> outputs = new LinkedHashMap<>();
+
+        Map<String, Object> config = node.config() == null
+                ? Map.of()
+                : node.config();
+
+        Object outputsObj = config.get("outputs");
+
+        if (outputsObj instanceof Map<?, ?> map) {
+            map.forEach((key, value) -> outputs.put(String.valueOf(key), value));
+        } else if (config.containsKey("value")) {
+            outputs.put("value", config.get("value"));
+        }
+
+        return outputs;
+    }
+}
+```
+
+---
+
+## 2. `JsonInputNodeExecutor.java`
+
+JSON 输入节点。
+
+配置示例：
+
+```json
+{
+  "outputs": {
+    "quantity": 3
+  }
+}
+```
+
+输出：
+
+```json
+{
+  "quantity": 3
+}
+```
+
+```java
+package com.example.flowdemo.executor;
+
+import com.example.flowdemo.engine.NodeExecutionContext;
+import com.example.flowdemo.engine.NodeExecutor;
+import com.example.flowdemo.model.NodeDefinition;
+import com.example.flowdemo.model.NodeResult;
+import org.springframework.stereotype.Component;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Component
+public class JsonInputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "INPUT_JSON";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        NodeDefinition node = context.node();
+
+        Map<String, Object> outputs = buildOutputs(node);
+
+        return NodeResult.success(outputs);
+    }
+
+    private Map<String, Object> buildOutputs(NodeDefinition node) {
+        Map<String, Object> outputs = new LinkedHashMap<>();
+
+        Map<String, Object> config = node.config() == null
+                ? Map.of()
+                : node.config();
+
+        Object outputsObj = config.get("outputs");
+
+        if (outputsObj instanceof Map<?, ?> map) {
+            map.forEach((key, value) -> outputs.put(String.valueOf(key), value));
+        } else if (config.containsKey("value")) {
+            outputs.put("value", config.get("value"));
+        }
+
+        return outputs;
+    }
+}
+```
+
+---
+
+## 3. `CalculateNodeExecutor.java`
+
+计算节点。
+
+这个 Demo 里支持：
+
+- `SUM`
+- `MULTIPLY`
+
+它会把所有输入端口里的数字拿出来计算。
+
+配置示例：
+
+```json
+{
+  "operation": "MULTIPLY"
+}
+```
+
+如果输入：
+
+```json
+{
+  "price": 100,
+  "quantity": 3
+}
+```
+
+输出：
+
+```json
+{
+  "result": 300,
+  "message": "operation=MULTIPLY, inputs={price=100, quantity=3}"
+}
+```
+
+```java
+package com.example.flowdemo.executor;
+
+import com.example.flowdemo.engine.NodeExecutionContext;
+import com.example.flowdemo.engine.NodeExecutor;
+import com.example.flowdemo.model.NodeResult;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+@Component
+public class CalculateNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "CALCULATE";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+            Map<String, Object> config = context.node().config() == null
+                    ? Map.of()
+                    : context.node().config();
+
+            String operation = String.valueOf(
+                    config.getOrDefault("operation", "SUM")
+            ).toUpperCase();
+
+            List<Double> numbers = new ArrayList<>();
+            collectNumbers(context.inputs().values(), numbers);
+
+            double result;
+
+            if (numbers.isEmpty()) {
+                result = 0;
+            } else if ("MULTIPLY".equals(operation)) {
+                result = numbers.stream()
+                        .reduce(1.0, (a, b) -> a * b);
+            } else {
+                result = numbers.stream()
+                        .mapToDouble(Double::doubleValue)
+                        .sum();
+            }
+
+            Map<String, Object> outputs = new LinkedHashMap<>();
+            outputs.put("result", result);
+            outputs.put(
+                    "message",
+                    "operation=" + operation + ", inputs=" + context.inputs()
+            );
+
+            return NodeResult.success(outputs);
+
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+
+    private void collectNumbers(Collection<Object> values, List<Double> numbers) {
+        for (Object value : values) {
+            collectNumber(value, numbers);
+        }
+    }
+
+    private void collectNumber(Object value, List<Double> numbers) {
+        if (value instanceof Collection<?> collection) {
+            for (Object item : collection) {
+                collectNumber(item, numbers);
+            }
+            return;
+        }
+
+        if (value == null) {
+            return;
+        }
+
+        try {
+            numbers.add(Double.parseDouble(value.toString()));
+        } catch (NumberFormatException ignored) {
+        }
+    }
+}
+```
+
+---
+
+## 4. `OutputNodeExecutor.java`
+
+输出节点。
+
+它会把输入它的所有数据重新作为输出。
+
+```java
+package com.example.flowdemo.executor;
+
+import com.example.flowdemo.engine.NodeExecutionContext;
+import com.example.flowdemo.engine.NodeExecutor;
+import com.example.flowdemo.model.NodeResult;
+import org.springframework.stereotype.Component;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Component
+public class OutputNodeExecutor implements NodeExecutor {
+
+    @Override
+    public String supportType() {
+        return "OUTPUT";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        Map<String, Object> outputs = new LinkedHashMap<>(context.inputs());
+
+        if (outputs.isEmpty()) {
+            outputs.put("message", "没有输入数据");
+        }
+
+        return NodeResult.success(outputs);
+    }
+}
+```
+
+---
+
+# 六、Controller
+
+---
+
+## `FlowController.java`
+
+这个 Controller 提供：
+
+```text
+GET  /api/flows/demo
+POST /api/flows/execute
+```
+
+```java
+package com.example.flowdemo.controller;
+
+import com.example.flowdemo.engine.FlowEngine;
+import com.example.flowdemo.model.EdgeDefinition;
+import com.example.flowdemo.model.FlowDefinition;
+import com.example.flowdemo.model.FlowExecutionResult;
+import com.example.flowdemo.model.InputPort;
+import com.example.flowdemo.model.NodeDefinition;
+import com.example.flowdemo.model.OutputPort;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/flows")
+public class FlowController {
+
+    private final FlowEngine flowEngine;
+
+    public FlowController(FlowEngine flowEngine) {
+        this.flowEngine = flowEngine;
+    }
+
+    @PostMapping("/execute")
+    public FlowExecutionResult execute(@RequestBody FlowDefinition flow) {
+        return flowEngine.execute(flow);
+    }
+
+    @GetMapping("/demo")
+    public FlowDefinition demo() {
+        List<NodeDefinition> nodes = List.of(
+                node(
+                        "node_manual",
+                        "INPUT_MANUAL",
+                        "手工输入价格",
+                        80,
+                        80,
+                        singleOutputConfig("price", 100),
+                        List.of(),
+                        List.of(
+                                output("price", "价格", "NUMBER")
+                        )
+                ),
+                node(
+                        "node_json",
+                        "INPUT_JSON",
+                        "JSON输入数量",
+                        80,
+                        260,
+                        singleOutputConfig("quantity", 3),
+                        List.of(),
+                        List.of(
+                                output("quantity", "数量", "NUMBER")
+                        )
+                ),
+                node(
+                        "node_calc",
+                        "CALCULATE",
+                        "计算总金额",
+                        380,
+                        160,
+                        Map.of("operation", "MULTIPLY"),
+                        List.of(
+                                input("price", "价格", "NUMBER"),
+                                input("quantity", "数量", "NUMBER")
+                        ),
+                        List.of(
+                                output("result", "计算结果", "NUMBER"),
+                                output("message", "计算信息", "STRING")
+                        )
+                ),
+                node(
+                        "node_output",
+                        "OUTPUT",
+                        "输出节点",
+                        700,
+                        160,
+                        Map.of(),
+                        List.of(
+                                input("result", "计算结果", "NUMBER"),
+                                input("message", "计算信息", "STRING")
+                        ),
+                        List.of(
+                                output("result", "最终结果", "NUMBER"),
+                                output("message", "最终信息", "STRING")
+                        )
+                )
+        );
+
+        List<EdgeDefinition> edges = List.of(
+                new EdgeDefinition(
+                        "edge_1",
+                        "node_manual",
+                        "price",
+                        "node_calc",
+                        "price"
+                ),
+                new EdgeDefinition(
+                        "edge_2",
+                        "node_json",
+                        "quantity",
+                        "node_calc",
+                        "quantity"
+                ),
+                new EdgeDefinition(
+                        "edge_3",
+                        "node_calc",
+                        "result",
+                        "node_output",
+                        "result"
+                ),
+                new EdgeDefinition(
+                        "edge_4",
+                        "node_calc",
+                        "message",
+                        "node_output",
+                        "message"
+                )
+        );
+
+        return new FlowDefinition(
+                "demo_flow",
+                "最小可视化计算流程",
+                nodes,
+                edges
+        );
+    }
+
+    private NodeDefinition node(
+            String id,
+            String type,
+            String name,
+            int x,
+            int y,
+            Map<String, Object> config,
+            List<InputPort> inputPorts,
+            List<OutputPort> outputPorts
+    ) {
+        return new NodeDefinition(
+                id,
+                type,
+                name,
+                Map.of("x", x, "y", y),
+                config,
+                inputPorts,
+                outputPorts
+        );
+    }
+
+    private Map<String, Object> singleOutputConfig(String key, Object value) {
+        return Map.of("outputs", Map.of(key, value));
+    }
+
+    private InputPort input(String code, String name, String dataType) {
+        return new InputPort(code, name, dataType, true, false);
+    }
+
+    private OutputPort output(String code, String name, String dataType) {
+        return new OutputPort(code, name, dataType);
+    }
+}
+```
+
+---
+
+# 七、前端代码
+
+---
+
+## 1. `frontend/package.json`
+
+```json
+{
+  "name": "flow-demo-frontend",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@vue-flow/core": "^1.0.0",
+    "axios": "^1.7.0",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}
+```
+
+---
+
+## 2. `frontend/vite.config.js`
+
+```javascript
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true
+      }
+    }
+  }
+})
+```
+
+---
+
+## 3. `frontend/index.html`
+
+```html
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Flow Demo</title>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
+```
+
+---
+
+## 4. `frontend/src/main.js`
+
+```javascript
+import { createApp } from 'vue'
+import App from './App.vue'
+
+import '@vue-flow/core/dist/style.css'
+import '@vue-flow/core/dist/theme-default.css'
+
+createApp(App).mount('#app')
+```
+
+---
+
+## 5. `frontend/src/components/FlowNode.vue`
+
+这是自定义节点。
+
+它会显示：
+
+- 节点名称
+- 节点类型
+- 输入端口
+- 输出端口
+- 执行状态
+- 输出结果
+
+```vue
+<script setup>
+import { computed } from 'vue'
+import { Handle, Position } from '@vue-flow/core'
+
+const props = defineProps({
+  data: {
+    type: Object,
+    required: true
+  }
+})
+
+const statusClass = computed(() => {
+  return props.data.status
+      ? String(props.data.status).toLowerCase()
+      : ''
+})
+</script>
+
+<template>
+  <div class="flow-node" :class="statusClass">
+    <div class="title">{{ data.label }}</div>
+    <div class="type">{{ data.backendType }}</div>
+
+    <Handle
+        v-for="(port, index) in data.inputPorts || []"
+        :key="'input-' + port.code"
+        type="target"
+        :position="Position.Left"
+        :id="port.code"
+        :style="{ top: 52 + index * 22 + 'px' }"
+    />
+
+    <Handle
+        v-for="(port, index) in data.outputPorts || []"
+        :key="'output-' + port.code"
+        type="source"
+        :position="Position.Right"
+        :id="port.code"
+        :style="{ top: 52 + index * 22 + 'px' }"
+    />
+
+    <div class="ports">
+      <div class="left">
+        <div
+            v-for="port in data.inputPorts || []"
+            :key="'input-label-' + port.code"
+            class="port-label"
+        >
+          {{ port.name || port.code }}
+        </div>
+      </div>
+
+      <div class="right">
+        <div
+            v-for="port in data.outputPorts || []"
+            :key="'output-label-' + port.code"
+            class="port-label"
+        >
+          {{ port.name || port.code }}
+        </div>
+      </div>
+    </div>
+
+    <div v-if="data.status" class="status">
+      {{ data.status }}
+    </div>
+
+    <pre v-if="data.outputs" class="outputs">{{ data.outputs }}</pre>
+
+    <div v-if="data.errorMessage" class="error">
+      {{ data.errorMessage }}
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.flow-node {
+  width: 240px;
+  padding: 10px 12px 12px;
+  border: 1px solid #bbb;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.flow-node.success {
+  border-color: #2e7d32;
+  box-shadow: 0 0 0 1px #2e7d32;
+}
+
+.flow-node.failed {
+  border-color: #c62828;
+  box-shadow: 0 0 0 1px #c62828;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.type {
+  margin-top: 2px;
+  color: #666;
+}
+
+.ports {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  gap: 10px;
+}
+
+.left,
+.right {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.port-label {
+  line-height: 18px;
+}
+
+.status {
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.outputs {
+  margin: 8px 0 0;
+  padding: 6px;
+  background: #f6f8fa;
+  border-radius: 4px;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.error {
+  margin-top: 6px;
+  color: #c62828;
+}
+</style>
+```
+
+---
+
+## 6. `frontend/src/App.vue`
+
+```vue
+<script setup>
+import { onMounted, ref, markRaw } from 'vue'
+import { VueFlow } from '@vue-flow/core'
+import axios from 'axios'
+import FlowNode from './components/FlowNode.vue'
+
+const nodeTypes = {
+  flowNode: markRaw(FlowNode)
+}
+
+const nodes = ref([])
+const edges = ref([])
+const result = ref(null)
+const message = ref('')
+
+onMounted(() => {
+  loadDemo()
+})
+
+async function loadDemo() {
+  try {
+    const response = await axios.get('/api/flows/demo')
+    applyFlow(response.data)
+    message.value = '示例流程加载成功'
+  } catch (error) {
+    message.value = '加载失败，请先启动后端：' + error.message
+  }
+}
+
+function applyFlow(data) {
+  nodes.value = (data.nodes || []).map(node => {
+    return {
+      id: node.id,
+      type: 'flowNode',
+      draggable: true,
+      position: node.position || { x: 0, y: 0 },
+      data: {
+        label: node.name,
+        backendType: node.type,
+        config: node.config || {},
+        inputPorts: node.inputPorts || [],
+        outputPorts: node.outputPorts || [],
+        outputs: null,
+        status: null,
+        errorMessage: null
+      }
+    }
+  })
+
+  edges.value = (data.edges || []).map(edge => {
+    return {
+      id: edge.id,
+      source: edge.sourceNodeId,
+      target: edge.targetNodeId,
+      sourceHandle: edge.sourcePort,
+      targetHandle: edge.targetPort
+    }
+  })
+}
+
+function onConnect(params) {
+  const edge = {
+    id: 'edge_' + Date.now(),
+    source: params.source,
+    target: params.target,
+    sourceHandle: params.sourceHandle,
+    targetHandle: params.targetHandle
+  }
+
+  edges.value = [...edges.value, edge]
+}
+
+async function executeFlow() {
+  try {
+    const payload = buildPayload()
+
+    const response = await axios.post('/api/flows/execute', payload)
+    result.value = response.data
+
+    nodes.value = nodes.value.map(node => {
+      const nodeResult = response.data.nodeResults?.[node.id]
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          status: nodeResult?.status || null,
+          outputs: nodeResult?.outputs || null,
+          errorMessage: nodeResult?.errorMessage || null
+        }
+      }
+    })
+
+    message.value = '执行完成：' + response.data.status
+  } catch (error) {
+    message.value = '执行失败：' + error.message
+  }
+}
+
+function buildPayload() {
+  return {
+    flowId: 'demo_flow',
+    name: '前端提交流程',
+    nodes: nodes.value.map(node => {
+      return {
+        id: node.id,
+        type: node.data.backendType,
+        name: node.data.label,
+        position: node.position,
+        config: node.data.config,
+        inputPorts: node.data.inputPorts,
+        outputPorts: node.data.outputPorts
+      }
+    }),
+    edges: edges.value.map(edge => {
+      return {
+        id: edge.id,
+        sourceNodeId: edge.source,
+        sourcePort: edge.sourceHandle ?? 'value',
+        targetNodeId: edge.target,
+        targetPort: edge.targetHandle ?? 'value'
+      }
+    })
+  }
+}
+</script>
+
+<template>
+  <div class="app">
+    <aside class="sidebar">
+      <h2>可视化计算节点</h2>
+
+      <div class="button-group">
+        <button @click="loadDemo">加载示例</button>
+        <button @click="executeFlow">执行流程</button>
+      </div>
+
+      <div class="message">{{ message }}</div>
+
+      <h3>执行结果</h3>
+      <pre class="result">{{ result }}</pre>
+    </aside>
+
+    <main class="canvas">
+      <VueFlow
+          :nodes="nodes"
+          :edges="edges"
+          :node-types="nodeTypes"
+          fit-view-on-init
+          @connect="onConnect"
+      />
+    </main>
+  </div>
+</template>
+
+<style>
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  height: 100%;
+}
+
+.sidebar {
+  width: 360px;
+  padding: 16px;
+  border-right: 1px solid #ddd;
+  overflow: auto;
+  background: #fafafa;
+}
+
+.button-group {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+button {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.message {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.result {
+  background: #ffffff;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  min-height: 200px;
+  max-height: 480px;
+  overflow: auto;
+}
+
+.canvas {
+  flex: 1;
+}
+</style>
+```
+
+---
+
+# 八、启动步骤
+
+---
+
+## 1. 启动后端
+
+进入后端目录：
+
+```bash
+cd backend
+```
+
+确保你本地有：
+
+- JDK 21
+- Maven 3.9+
+
+启动：
+
+```bash
+mvn spring-boot:run
+```
+
+启动成功后：
+
+```text
+http://localhost:8080
+```
+
+测试示例流程接口：
+
+```text
+http://localhost:8080/api/flows/demo
+```
+
+---
+
+## 2. 启动前端
+
+进入前端目录：
+
+```bash
+cd frontend
+```
+
+安装依赖：
+
+```bash
+npm install
+```
+
+启动：
+
+```bash
+npm run dev
+```
+
+访问：
+
+```text
+http://localhost:5173
+```
+
+---
+
+# 九、Demo 运行效果
+
+页面打开后会自动加载示例流程。
+
+示例流程是：
+
+```text
+手工输入价格
+        \
+         -> 计算总金额 -> 输出节点
+        /
+JSON输入数量
+```
+
+具体为：
+
+```text
+node_manual.price      -> node_calc.price
+node_json.quantity     -> node_calc.quantity
+node_calc.result       -> node_output.result
+node_calc.message      -> node_output.message
+```
+
+点击：
+
+```text
+执行流程
+```
+
+后端会计算：
+
+```text
+price = 100
+quantity = 3
+operation = MULTIPLY
+```
+
+所以：
+
+```text
+result = 100 * 3 = 300
+```
+
+前端节点会显示：
+
+- `SUCCESS`
+- 每个节点的输出结果
+- 最终输出节点结果
+
+输出节点大致会得到：
+
+```json
+{
+  "result": 300,
+  "message": "operation=MULTIPLY, inputs={price=100, quantity=3}"
+}
+```
+
+---
+
+# 十、这个 Demo 已经覆盖了哪些能力
+
+这个最小 Demo 已经支持：
+
+## 1. 可视化节点
+
+前端使用 `Vue Flow` 渲染节点。
+
+---
+
+## 2. 节点拖动
+
+节点可以拖动位置。
+
+---
+
+## 3. 节点连线
+
+你可以从输出端口拖到输入端口。
+
+---
+
+## 4. 多输入端口
+
+`计算总金额` 节点有：
+
+```text
+price
+quantity
+```
+
+两个输入端口。
+
+---
+
+## 5. 多输出端口
+
+`计算总金额` 节点有：
+
+```text
+result
+message
+```
+
+两个输出端口。
+
+---
+
+## 6. 上游节点输出作为下游节点输入
+
+通过：
+
+```text
+sourceNodeId + sourcePort
+targetNodeId + targetPort
+```
+
+实现。
+
+---
+
+## 7. 后端 DAG 执行
+
+后端会做：
+
+```text
+拓扑排序 -> 顺序执行 -> 上下文传递
+```
+
+---
+
+## 8. 每个节点执行结果可追踪
+
+后端返回：
+
+```json
+{
+  "executionId": "xxx",
+  "status": "SUCCESS",
+  "nodeResults": {
+    "node_manual": {},
+    "node_json": {},
+    "node_calc": {},
+    "node_output": {}
+  }
+}
+```
+
+---
+
+# 十一、后续扩展建议
+
+这个 Demo 是基础骨架，后续你可以按这个方向扩展。
+
+---
+
+## 1. 增加 Excel 输入节点
+
+新增节点类型：
+
+```text
+INPUT_EXCEL
+```
+
+新增执行器：
+
+```java
+ExcelInputNodeExecutor
+```
+
+推荐依赖：
+
+```text
+EasyExcel
+```
+
+或者：
+
+```text
+Apache POI
+```
+
+节点配置：
+
+```json
+{
+  "fileId": "file_001",
+  "sheetName": "Sheet1"
+}
+```
+
+输出：
+
+```json
+{
+  "data": [
+    {
+      "orderId": "A001",
+      "amount": 100
+    },
+    {
+      "orderId": "A002",
+      "amount": 200
+    }
+  ]
+}
+```
+
+---
+
+## 2. 增加数据库输入节点
+
+节点类型：
+
+```text
+INPUT_DATABASE
+```
+
+配置：
+
+```json
+{
+  "dataSourceCode": "biz_db",
+  "sql": "select * from sales"
+}
+```
+
+---
+
+## 3. 增加 API 输入节点
+
+节点类型：
+
+```text
+INPUT_API
+```
+
+配置：
+
+```json
+{
+  "url": "http://localhost:8080/api/mock/data",
+  "method": "GET"
+}
+```
+
+---
+
+## 4. 增加表达式计算
+
+当前 `CalculateNodeExecutor` 是简单数字计算。
+
+后续可以接入：
+
+```text
+Aviator
+QLExpress
+Spring EL
+GraalVM JavaScript
+```
+
+例如：
+
+```text
+price * quantity * discount
+```
+
+---
+
+## 5. 增加条件分支
+
+节点类型：
+
+```text
+CONDITION
+```
+
+输出端口：
+
+```text
+true
+false
+```
+
+---
+
+## 6. 增加节点执行日志表
+
+建议数据库增加：
+
+```text
+flow_execution
+node_execution
+```
+
+记录：
+
+- 执行时间
+- 输入数据
+- 输出数据
+- 错误信息
+- 执行状态
+
+---
+
+## 7. 增加流程版本管理
+
+建议表：
+
+```text
+flow_definition
+flow_version
+```
+
+---
+
+## 8. 增加异步执行
+
+如果流程执行时间较长：
+
+```text
+POST /api/flows/execute
+```
+
+返回：
+
+```json
+{
+  "executionId": "xxx",
+  "status": "RUNNING"
+}
+```
+
+然后：
+
+```text
+GET /api/executions/{executionId}
+```
+
+或者使用：
+
+```text
+SSE
+WebSocket
+```
+
+---
+
+# 十二、你现在得到的是什么
+
+你现在得到的是一个可以落地的最小架构：
+
+```text
+Vue3 前端画布
+        |
+        | 提交节点、连线、配置
+        v
+Spring Boot 3
+        |
+        |-- FlowController
+        |-- FlowEngine
+        |-- NodeExecutor
+        |-- ExecutionContext
+        |
+        v
+按 DAG 顺序执行节点
+```
+
+核心设计已经具备：
+
+```text
+节点 Node
+连线 Edge
+输入端口 InputPort
+输出端口 OutputPort
+执行器 NodeExecutor
+执行上下文 ExecutionContext
+DAG 拓扑排序
+节点结果追踪
+```
+
+这个结构后续可以直接扩展成：
+
+- 数据编排平台
+- 计算规则引擎
+- 可视化 ETL
+- 业务流程编排
+- 低代码计算流平台
+
+---
+
+如果你愿意，我下一步可以继续给你补一份：
+
+1. **Excel 输入节点完整实现**
+2. **前端上传 Excel + 后端 EasyExcel 解析**
+3. **多输入聚合节点 `MERGE`**
+4. **条件分支节点 `CONDITION`**
+5. **数据库保存流程结构的完整版本**
+
+### USER
+我看差不多了 怎么把现有的一些计算方法包装成节点，然后展示在左侧，这样就可以自由搭配节点连线了。最好用注解，比如在方法上加一个注解，启动时自动代表一个节点。
+
+### ASSISTANT
+可以做，而且非常适合用「注解 + 启动扫描 + 方法节点执行器」的方式实现。
+
+你的目标可以抽象成：
+
+> 在某个 Spring Bean 的方法上加注解，启动时自动识别为一个流程节点。  
+> 方法参数自动变成节点输入端口。  
+> 方法返回值自动变成节点输出端口。  
+> 前端左侧展示这些节点，可以拖入/添加到画布，自由连线执行。
+
+下面我基于前面那个 Demo，给你一套可以直接扩展的方案。
+
+---
+
+# 一、最终效果
+
+你可以这样写一个计算方法：
+
+```java
+@Service
+public class DemoCalcNodes {
+
+    @FlowNode(
+            code = "multiplyPriceQuantity",
+            name = "价格数量相乘",
+            category = "计算",
+            description = "价格 * 数量",
+            outputs = {
+                    @FlowOutput(code = "result", name = "计算结果", dataType = "NUMBER"),
+                    @FlowOutput(code = "message", name = "计算信息", dataType = "STRING")
+            }
+    )
+    public Map<String, Object> multiplyPriceQuantity(
+            @FlowInput(value = "price", name = "价格") double price,
+            @FlowInput(value = "quantity", name = "数量") int quantity
+    ) {
+        double result = price * quantity;
+
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("result", result);
+        outputs.put("message", "price * quantity = " + result);
+
+        return outputs;
+    }
+}
+```
+
+启动后：
+
+- 自动注册为一个节点：`价格数量相乘`
+- 左侧节点库会显示它
+- 前端可以添加它
+- 输入端口自动是：
+
+```text
+price
+quantity
+```
+
+- 输出端口自动是：
+
+```text
+result
+message
+```
+
+然后你可以自由连线：
+
+```text
+手工输入价格 -> 价格数量相乘
+JSON输入数量 -> 价格数量相乘
+价格数量相乘 -> 输出节点
+```
+
+---
+
+# 二、整体设计
+
+核心思路：
+
+```text
+@FlowNode 方法
+   ↓
+启动时扫描
+   ↓
+生成节点模板 NodeTemplate
+   ↓
+放入节点仓库 FlowNodeRegistry
+   ↓
+前端从 /api/node-templates 获取左侧节点
+   ↓
+用户添加节点到画布
+   ↓
+节点实例类型 = METHOD
+配置里保存 methodCode
+   ↓
+后端执行时由 MethodNodeExecutor 找到对应方法
+   ↓
+反射调用方法
+   ↓
+返回输入输出结果
+```
+
+核心模型：
+
+```text
+方法参数 -> 输入端口
+方法返回值 -> 输出端口
+方法本身 -> 节点执行逻辑
+```
+
+---
+
+# 三、新增注解
+
+---
+
+## 1. `FlowNode.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/annotation/FlowNode.java
+```
+
+```java
+package com.example.flowdemo.annotation;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface FlowNode {
+
+    String code() default "";
+
+    String name();
+
+    String category() default "通用";
+
+    String description() default "";
+
+    FlowOutput[] outputs() default {};
+}
+```
+
+---
+
+## 2. `FlowInput.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/annotation/FlowInput.java
+```
+
+```java
+package com.example.flowdemo.annotation;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target(ElementType.PARAMETER)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface FlowInput {
+
+    String value() default "";
+
+    String name() default "";
+
+    boolean required() default true;
+
+    boolean multi() default false;
+}
+```
+
+---
+
+## 3. `FlowOutput.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/annotation/FlowOutput.java
+```
+
+```java
+package com.example.flowdemo.annotation;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target({ElementType.METHOD, ElementType.FIELD, ElementType.ANNOTATION})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface FlowOutput {
+
+    String code();
+
+    String name() default "";
+
+    String dataType() default "OBJECT";
+}
+```
+
+---
+
+# 四、方法节点模型
+
+---
+
+## 1. `MethodInputParam.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/node/MethodInputParam.java
+```
+
+```java
+package com.example.flowdemo.node;
+
+import java.lang.reflect.Type;
+
+public record MethodInputParam(
+        String code,
+        String name,
+        Class<?> rawType,
+        Type genericType,
+        boolean required
+) {
+}
+```
+
+---
+
+## 2. `MethodNodeDefinition.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/node/MethodNodeDefinition.java
+```
+
+```java
+package com.example.flowdemo.node;
+
+import com.example.flowdemo.model.OutputPort;
+
+import java.lang.reflect.Method;
+import java.util.List;
+
+public record MethodNodeDefinition(
+        String code,
+        Object bean,
+        Method method,
+        List<MethodInputParam> inputParams,
+        List<OutputPort> outputPorts
+) {
+}
+```
+
+---
+
+## 3. `NodeTemplate.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/node/NodeTemplate.java
+```
+
+```java
+package com.example.flowdemo.node;
+
+import com.example.flowdemo.model.InputPort;
+import com.example.flowdemo.model.OutputPort;
+
+import java.util.List;
+import java.util.Map;
+
+public record NodeTemplate(
+        String code,
+        String name,
+        String category,
+        String description,
+        String nodeType,
+        Map<String, Object> defaultConfig,
+        List<InputPort> inputPorts,
+        List<OutputPort> outputPorts
+) {
+}
+```
+
+---
+
+# 五、节点注册中心
+
+---
+
+## `FlowNodeRegistry.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/node/FlowNodeRegistry.java
+```
+
+```java
+package com.example.flowdemo.node;
+
+import org.springframework.stereotype.Component;
+
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+@Component
+public class FlowNodeRegistry {
+
+    private final Map<String, MethodNodeDefinition> methodNodes = new ConcurrentHashMap<>();
+
+    private final List<NodeTemplate> templates = new CopyOnWriteArrayList<>();
+
+    public void register(MethodNodeDefinition definition, NodeTemplate template) {
+        if (methodNodes.containsKey(definition.code())) {
+            throw new IllegalStateException("重复的节点代码: " + definition.code());
+        }
+
+        methodNodes.put(definition.code(), definition);
+        templates.add(template);
+    }
+
+    public MethodNodeDefinition getMethodNode(String code) {
+        return methodNodes.get(code);
+    }
+
+    public List<NodeTemplate> getTemplates() {
+        return templates.stream()
+                .sorted(
+                        Comparator.comparing(NodeTemplate::category)
+                                .thenComparing(NodeTemplate::name)
+                )
+                .toList();
+    }
+}
+```
+
+---
+
+# 六、启动时自动扫描注解
+
+---
+
+## `FlowNodeScanner.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/node/FlowNodeScanner.java
+```
+
+这个类会在 Spring 启动完成后扫描所有 Bean 的方法。
+
+只要方法上有 `@FlowNode`，就自动注册成节点。
+
+```java
+package com.example.flowdemo.node;
+
+import com.example.flowdemo.annotation.FlowInput;
+import com.example.flowdemo.annotation.FlowNode;
+import com.example.flowdemo.annotation.FlowOutput;
+import com.example.flowdemo.model.InputPort;
+import com.example.flowdemo.model.OutputPort;
+import org.springframework.aop.framework.Advised;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.stereotype.Component;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.RecordComponent;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+@Component
+public class FlowNodeScanner implements SmartInitializingSingleton {
+
+    private final ApplicationContext applicationContext;
+
+    private final FlowNodeRegistry registry;
+
+    private final ParameterNameDiscoverer parameterNameDiscoverer =
+            new DefaultParameterNameDiscoverer();
+
+    public FlowNodeScanner(
+            ApplicationContext applicationContext,
+            FlowNodeRegistry registry
+    ) {
+        this.applicationContext = applicationContext;
+        this.registry = registry;
+    }
+
+    @Override
+    public void afterSingletonsInstantiated() {
+        String[] beanNames = applicationContext.getBeanDefinitionNames();
+
+        for (String beanName : beanNames) {
+            Object bean;
+
+            try {
+                bean = applicationContext.getBean(beanName);
+            } catch (Exception e) {
+                continue;
+            }
+
+            Object target = resolveTarget(bean);
+            Class<?> targetClass = target.getClass();
+
+            ReflectionUtils.doWithMethods(targetClass, method -> {
+                FlowNode annotation = AnnotationUtils.findAnnotation(method, FlowNode.class);
+
+                if (annotation == null) {
+                    return;
+                }
+
+                registerMethodNode(bean, targetClass, method, annotation);
+            });
+        }
+    }
+
+    private Object resolveTarget(Object bean) {
+        try {
+            if (AopUtils.isAopProxy(bean) && bean instanceof Advised advised) {
+                Object target = advised.getTargetSource().getTarget();
+
+                if (target != null) {
+                    return target;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        return bean;
+    }
+
+    private void registerMethodNode(
+            Object bean,
+            Class<?> targetClass,
+            Method method,
+            FlowNode annotation
+    ) {
+        String code = StringUtils.hasText(annotation.code())
+                ? annotation.code()
+                : method.getName();
+
+        List<MethodInputParam> inputParams = new ArrayList<>();
+        List<InputPort> inputPorts = new ArrayList<>();
+
+        Parameter[] parameters = method.getParameters();
+        String[] parameterNames = parameterNameDiscoverer.getParameterNames(method);
+
+        for (int i = 0; i < parameters.length; i++) {
+            Parameter parameter = parameters[i];
+
+            FlowInput inputAnnotation = parameter.getAnnotation(FlowInput.class);
+
+            String paramCode;
+
+            if (inputAnnotation != null && StringUtils.hasText(inputAnnotation.value())) {
+                paramCode = inputAnnotation.value();
+            } else if (parameterNames != null
+                    && parameterNames.length > i
+                    && StringUtils.hasText(parameterNames[i])) {
+                paramCode = parameterNames[i];
+            } else {
+                paramCode = "arg" + i;
+            }
+
+            String paramName = inputAnnotation != null && StringUtils.hasText(inputAnnotation.name())
+                    ? inputAnnotation.name()
+                    : paramCode;
+
+            boolean required = inputAnnotation == null || inputAnnotation.required();
+
+            boolean multi = inputAnnotation != null
+                    ? inputAnnotation.multi()
+                    : Collection.class.isAssignableFrom(parameter.getType());
+
+            inputParams.add(
+                    new MethodInputParam(
+                            paramCode,
+                            paramName,
+                            parameter.getType(),
+                            parameter.getParameterizedType(),
+                            required
+                    )
+            );
+
+            inputPorts.add(
+                    new InputPort(
+                            paramCode,
+                            paramName,
+                            dataType(parameter.getType()),
+                            required,
+                            multi
+                    )
+            );
+        }
+
+        List<OutputPort> outputPorts = buildOutputPorts(method, annotation);
+
+        Method invokeMethod = ReflectionUtils.findMethod(
+                bean.getClass(),
+                method.getName(),
+                method.getParameterTypes()
+        );
+
+        if (invokeMethod == null) {
+            invokeMethod = method;
+        }
+
+        ReflectionUtils.makeAccessible(invokeMethod);
+
+        MethodNodeDefinition definition = new MethodNodeDefinition(
+                code,
+                bean,
+                invokeMethod,
+                inputParams,
+                outputPorts
+        );
+
+        NodeTemplate template = new NodeTemplate(
+                code,
+                annotation.name(),
+                annotation.category(),
+                annotation.description(),
+                "METHOD",
+                Map.of("methodCode", code),
+                inputPorts,
+                outputPorts
+        );
+
+        registry.register(definition, template);
+    }
+
+    private List<OutputPort> buildOutputPorts(Method method, FlowNode annotation) {
+        if (annotation.outputs().length > 0) {
+            return Arrays.stream(annotation.outputs())
+                    .map(output -> new OutputPort(
+                            output.code(),
+                            StringUtils.hasText(output.name()) ? output.name() : output.code(),
+                            output.dataType()
+                    ))
+                    .toList();
+        }
+
+        Class<?> returnType = method.getReturnType();
+
+        if (returnType == void.class || returnType == Void.class) {
+            return List.of();
+        }
+
+        if (returnType.isRecord()) {
+            RecordComponent[] components = returnType.getRecordComponents();
+
+            return Arrays.stream(components)
+                    .map(component -> new OutputPort(
+                            component.getName(),
+                            component.getName(),
+                            dataType(component.getType())
+                    ))
+                    .toList();
+        }
+
+        if (Map.class.isAssignableFrom(returnType)) {
+            return List.of(
+                    new OutputPort(
+                            "result",
+                            "结果",
+                            "OBJECT"
+                    )
+            );
+        }
+
+        return List.of(
+                new OutputPort(
+                        "result",
+                        "结果",
+                        dataType(returnType)
+                )
+        );
+    }
+
+    private String dataType(Class<?> type) {
+        if (type == int.class
+                || type == long.class
+                || type == double.class
+                || type == float.class
+                || type == short.class
+                || type == byte.class
+                || Number.class.isAssignableFrom(type)) {
+            return "NUMBER";
+        }
+
+        if (type == String.class || CharSequence.class.isAssignableFrom(type)) {
+            return "STRING";
+        }
+
+        if (type == boolean.class || type == Boolean.class) {
+            return "BOOLEAN";
+        }
+
+        if (type.isArray() || Collection.class.isAssignableFrom(type)) {
+            return "ARRAY";
+        }
+
+        return "OBJECT";
+    }
+}
+```
+
+---
+
+# 七、方法节点执行器
+
+---
+
+## `MethodNodeExecutor.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/executor/MethodNodeExecutor.java
+```
+
+所有 `type = METHOD` 的节点都由它执行。
+
+它会根据节点配置里的 `methodCode` 找到对应方法，然后反射调用。
+
+```java
+package com.example.flowdemo.executor;
+
+import com.example.flowdemo.engine.NodeExecutionContext;
+import com.example.flowdemo.engine.NodeExecutor;
+import com.example.flowdemo.model.NodeResult;
+import com.example.flowdemo.model.OutputPort;
+import com.example.flowdemo.node.FlowNodeRegistry;
+import com.example.flowdemo.node.MethodInputParam;
+import com.example.flowdemo.node.MethodNodeDefinition;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Component;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+@Component
+public class MethodNodeExecutor implements NodeExecutor {
+
+    private final FlowNodeRegistry registry;
+
+    private final ObjectMapper objectMapper;
+
+    public MethodNodeExecutor(
+            FlowNodeRegistry registry,
+            ObjectMapper objectMapper
+    ) {
+        this.registry = registry;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public String supportType() {
+        return "METHOD";
+    }
+
+    @Override
+    public NodeResult execute(NodeExecutionContext context) {
+        try {
+            Map<String, Object> config = context.node().config() == null
+                    ? Map.of()
+                    : context.node().config();
+
+            String methodCode = String.valueOf(config.get("methodCode"));
+
+            MethodNodeDefinition definition = registry.getMethodNode(methodCode);
+
+            if (definition == null) {
+                return NodeResult.fail("找不到方法节点: " + methodCode);
+            }
+
+            Map<String, Object> inputs = mergeInputs(context);
+
+            List<Object> args = new ArrayList<>();
+
+            for (MethodInputParam param : definition.inputParams()) {
+                Object value = inputs.get(param.code());
+
+                if (value == null) {
+                    if (param.required()) {
+                        if (param.rawType().isPrimitive()) {
+                            value = defaultPrimitive(param.rawType());
+                        } else {
+                            return NodeResult.fail("缺少输入: " + param.code());
+                        }
+                    }
+                }
+
+                args.add(convertValue(value, param));
+            }
+
+            Object result = definition.method().invoke(
+                    definition.bean(),
+                    args.toArray()
+            );
+
+            Map<String, Object> outputs = buildOutputs(definition, result);
+
+            return NodeResult.success(outputs);
+
+        } catch (InvocationTargetException e) {
+            return NodeResult.fail(e.getTargetException().getMessage());
+        } catch (Exception e) {
+            return NodeResult.fail(e.getMessage());
+        }
+    }
+
+    private Map<String, Object> mergeInputs(NodeExecutionContext context) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+
+        if (context.inputs() != null) {
+            merged.putAll(context.inputs());
+        }
+
+        Map<String, Object> config = context.node().config() == null
+                ? Map.of()
+                : context.node().config();
+
+        Object inputValuesObj = config.get("inputValues");
+
+        if (inputValuesObj instanceof Map<?, ?> map) {
+            map.forEach((key, value) -> {
+                merged.putIfAbsent(String.valueOf(key), value);
+            });
+        }
+
+        return merged;
+    }
+
+    private Object convertValue(Object value, MethodInputParam param) {
+        if (value == null) {
+            if (param.rawType().isPrimitive()) {
+                return defaultPrimitive(param.rawType());
+            }
+
+            return null;
+        }
+
+        JavaType javaType = objectMapper.constructType(param.genericType());
+
+        return objectMapper.convertValue(value, javaType);
+    }
+
+    private Object defaultPrimitive(Class<?> type) {
+        if (type == boolean.class) {
+            return false;
+        }
+
+        if (type == int.class) {
+            return 0;
+        }
+
+        if (type == long.class) {
+            return 0L;
+        }
+
+        if (type == double.class) {
+            return 0.0D;
+        }
+
+        if (type == float.class) {
+            return 0.0F;
+        }
+
+        if (type == short.class) {
+            return (short) 0;
+        }
+
+        if (type == byte.class) {
+            return (byte) 0;
+        }
+
+        if (type == char.class) {
+            return '\0';
+        }
+
+        return null;
+    }
+
+    private Map<String, Object> buildOutputs(
+            MethodNodeDefinition definition,
+            Object result
+    ) {
+        Map<String, Object> outputs = new LinkedHashMap<>();
+
+        if (result == null) {
+            return outputs;
+        }
+
+        List<OutputPort> ports = definition.outputPorts();
+
+        if (ports.isEmpty()) {
+            return outputs;
+        }
+
+        if (result instanceof Map<?, ?> map) {
+            Map<String, Object> converted = new LinkedHashMap<>();
+
+            map.forEach((key, value) -> converted.put(String.valueOf(key), value));
+
+            if (ports.size() == 1
+                    && "result".equals(ports.get(0).code())
+                    && !converted.containsKey("result")) {
+                outputs.put("result", converted);
+            } else {
+                for (OutputPort port : ports) {
+                    if (converted.containsKey(port.code())) {
+                        outputs.put(port.code(), converted.get(port.code()));
+                    }
+                }
+
+                if (outputs.isEmpty()) {
+                    outputs.putAll(converted);
+                }
+            }
+
+            return outputs;
+        }
+
+        if (ports.size() == 1 && isSimple(result)) {
+            outputs.put(ports.get(0).code(), result);
+            return outputs;
+        }
+
+        try {
+            Map<String, Object> map = objectMapper.convertValue(
+                    result,
+                    new TypeReference<Map<String, Object>>() {
+                    }
+            );
+
+            for (OutputPort port : ports) {
+                if (map.containsKey(port.code())) {
+                    outputs.put(port.code(), map.get(port.code()));
+                }
+            }
+
+            if (outputs.isEmpty() && ports.size() == 1) {
+                outputs.put(ports.get(0).code(), result);
+            }
+
+        } catch (Exception e) {
+            outputs.put(ports.get(0).code(), result);
+        }
+
+        return outputs;
+    }
+
+    private boolean isSimple(Object value) {
+        return value instanceof Number
+                || value instanceof CharSequence
+                || value instanceof Boolean
+                || value instanceof Character
+                || value instanceof java.util.UUID
+                || value instanceof java.time.temporal.TemporalAccessor;
+    }
+}
+```
+
+---
+
+# 八、示例：把计算方法包装成节点
+
+---
+
+## `DemoCalcNodes.java`
+
+路径：
+
+```text
+backend/src/main/java/com/example/flowdemo/service/DemoCalcNodes.java
+```
+
+这里给你两个例子。
+
+### 例子 1：返回 Map，手动指定输出端口
+
+```java
+package com.example.flowdemo.service;
+
+import com.example.flowdemo.annotation.FlowInput;
+import com.example.flowdemo.annotation.FlowNode;
+import com.example.flowdemo.annotation.FlowOutput;
+import org.springframework.stereotype.Service;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Service
+public class DemoCalcNodes {
+
+    @FlowNode(
+            code = "multiplyPriceQuantity",
+            name = "价格数量相乘",
+            category = "计算",
+            description = "价格 * 数量",
+            outputs = {
+                    @FlowOutput(code = "result", name = "计算结果", dataType = "NUMBER"),
+                    @FlowOutput(code = "message", name = "计算信息", dataType = "STRING")
+            }
+    )
+    public Map<String, Object> multiplyPriceQuantity(
+            @FlowInput(value = "price", name = "价格") double price,
+            @FlowInput(value = "quantity", name = "数量") int quantity
+    ) {
+        double result = price * quantity;
+
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("result", result);
+        outputs.put("message", "price * quantity = " + result);
+
+        return outputs;
+    }
+}
+```
+
+---
+
+### 例子 2：返回 Record，自动生成输出端口
+
+继续放在同一个类里：
+
+```java
+    @FlowNode(
+            code = "discountAmount",
+            name = "折扣金额计算",
+            category = "计算",
+            description = "根据金额和折扣率计算最终金额与优惠金额"
+    )
+    public DiscountResult discountAmount(
+            @FlowInput(value = "amount", name = "金额") double amount,
+            @FlowInput(value = "discountRate", name = "折扣率") double discountRate
+    ) {
+        double finalAmount = amount * discountRate;
+        double savedAmount = amount - finalAmount;
+
+        return new DiscountResult(finalAmount, savedAmount);
+    }
+
+    public record DiscountResult(
+            double finalAmount,
+            double savedAmount
+    ) {
+    }
+```
+
+完整 `DemoCalcNodes.java`：
+
+```java
+package com.example.flowdemo.service;
+
+import com.example.flowdemo.annotation.FlowInput;
+import com.example.flowdemo.annotation.FlowNode;
+import com.example.flowdemo.annotation.FlowOutput;
+import org.springframework.stereotype.Service;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Service
+public class DemoCalcNodes {
+
+    @FlowNode(
+            code = "multiplyPriceQuantity",
+            name = "价格数量相乘",
+            category = "计算",
+            description = "价格 * 数量",
+            outputs = {
+                    @FlowOutput(code = "result", name = "计算结果", dataType = "NUMBER"),
+                    @FlowOutput(code = "message", name = "计算信息", dataType = "STRING")
+            }
+    )
+    public Map<String, Object> multiplyPriceQuantity(
+            @FlowInput(value = "price", name = "价格") double price,
+            @FlowInput(value = "quantity", name = "数量") int quantity
+    ) {
+        double result = price * quantity;
+
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("result", result);
+        outputs.put("message", "price * quantity = " + result);
+
+        return outputs;
+    }
+
+    @FlowNode(
+            code = "discountAmount",
+            name = "折扣金额计算",
+            category = "计算",
+            description = "根据金额和折扣率计算最终金额与优惠金额"
+    )
+    public DiscountResult discountAmount(
+            @FlowInput(value = "amount", name = "金额") double amount,
+            @FlowInput(value = "discountRate", name = "折扣率") double discountRate
+    ) {
+        double finalAmount = amount * discountRate;
+        double savedAmount = amount - finalAmount;
+
+        return new DiscountResult(finalAmount, savedAmount);
+    }
+
+    public record DiscountResult(
+            double finalAmount,
+            double savedAmount
+    ) {
+    }
+}
+```
+
+启动后左侧会看到：
+
+```text
+计算
+  价格数量相乘
+  折扣金额计算
+```
+
+---
+
+# 九、修改 `pom.xml`
+
+为了让方法参数名能被反射读取，建议开启 `-parameters`。
+
+如果你不写 `@FlowInput("xxx")`，而是希望直接用方法参数名作为端口名，这个配置很重要。
+
+在 `backend/pom.xml` 的 `<build>` 里加：
+
+```xml
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <configuration>
+        <parameters>true</parameters>
+    </configuration>
+</plugin>
+```
+
+完整 build 示例：
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <configuration>
+                <parameters>true</parameters>
+            </configuration>
+        </plugin>
+
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+        </plugin>
+    </plugins>
+</build>
+```
+
+---
+
+# 十、修改 `FlowController`
+
+新增接口：
+
+```text
+GET /api/node-templates
+```
+
+前端左侧节点库就调用这个接口。
+
+同时把原来的 `CALCULATE` 示例节点改成自动注册的 `METHOD` 节点。
+
+完整替换：
+
+```text
+backend/src/main/java/com/example/flowdemo/controller/FlowController.java
+```
+
+```java
+package com.example.flowdemo.controller;
+
+import com.example.flowdemo.engine.FlowEngine;
+import com.example.flowdemo.model.EdgeDefinition;
+import com.example.flowdemo.model.FlowDefinition;
+import com.example.flowdemo.model.FlowExecutionResult;
+import com.example.flowdemo.model.InputPort;
+import com.example.flowdemo.model.NodeDefinition;
+import com.example.flowdemo.model.OutputPort;
+import com.example.flowdemo.node.FlowNodeRegistry;
+import com.example.flowdemo.node.NodeTemplate;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/flows")
+public class FlowController {
+
+    private final FlowEngine flowEngine;
+
+    private final FlowNodeRegistry flowNodeRegistry;
+
+    public FlowController(
+            FlowEngine flowEngine,
+            FlowNodeRegistry flowNodeRegistry
+    ) {
+        this.flowEngine = flowEngine;
+        this.flowNodeRegistry = flowNodeRegistry;
+    }
+
+    @PostMapping("/execute")
+    public FlowExecutionResult execute(@RequestBody FlowDefinition flow) {
+        return flowEngine.execute(flow);
+    }
+
+    @GetMapping("/node-templates")
+    public List<NodeTemplate> nodeTemplates() {
+        return flowNodeRegistry.getTemplates();
+    }
+
+    @GetMapping("/demo")
+    public FlowDefinition demo() {
+        List<NodeDefinition> nodes = List.of(
+                node(
+                        "node_manual",
+                        "INPUT_MANUAL",
+                        "手工输入价格",
+                        80,
+                        80,
+                        singleOutputConfig("price", 100),
+                        List.of(),
+                        List.of(
+                                output("price", "价格", "NUMBER")
+                        )
+                ),
+                node(
+                        "node_json",
+                        "INPUT_JSON",
+                        "JSON输入数量",
+                        80,
+                        260,
+                        singleOutputConfig("quantity", 3),
+                        List.of(),
+                        List.of(
+                                output("quantity", "数量", "NUMBER")
+                        )
+                ),
+                node(
+                        "node_method",
+                        "METHOD",
+                        "价格数量相乘",
+                        380,
+                        160,
+                        Map.of("methodCode", "multiplyPriceQuantity"),
+                        List.of(
+                                input("price", "价格", "NUMBER"),
+                                input("quantity", "数量", "NUMBER")
+                        ),
+                        List.of(
+                                output("result", "计算结果", "NUMBER"),
+                                output("message", "计算信息", "STRING")
+                        )
+                ),
+                node(
+                        "node_output",
+                        "OUTPUT",
+                        "输出节点",
+                        720,
+                        160,
+                        Map.of(),
+                        List.of(
+                                input("result", "计算结果", "NUMBER"),
+                                input("message", "计算信息", "STRING")
+                        ),
+                        List.of(
+                                output("result", "最终结果", "NUMBER"),
+                                output("message", "最终信息", "STRING")
+                        )
+                )
+        );
+
+        List<EdgeDefinition> edges = List.of(
+                new EdgeDefinition(
+                        "edge_1",
+                        "node_manual",
+                        "price",
+                        "node_method",
+                        "price"
+                ),
+                new EdgeDefinition(
+                        "edge_2",
+                        "node_json",
+                        "quantity",
+                        "node_method",
+                        "quantity"
+                ),
+                new EdgeDefinition(
+                        "edge_3",
+                        "node_method",
+                        "result",
+                        "node_output",
+                        "result"
+                ),
+                new EdgeDefinition(
+                        "edge_4",
+                        "node_method",
+                        "message",
+                        "node_output",
+                        "message"
+                )
+        );
+
+        return new FlowDefinition(
+                "demo_flow",
+                "方法节点示例流程",
+                nodes,
+                edges
+        );
+    }
+
+    private NodeDefinition node(
+            String id,
+            String type,
+            String name,
+            int x,
+            int y,
+            Map<String, Object> config,
+            List<InputPort> inputPorts,
+            List<OutputPort> outputPorts
+    ) {
+        return new NodeDefinition(
+                id,
+                type,
+                name,
+                Map.of("x", x, "y", y),
+                config,
+                inputPorts,
+                outputPorts
+        );
+    }
+
+    private Map<String, Object> singleOutputConfig(String key, Object value) {
+        return Map.of("outputs", Map.of(key, value));
+    }
+
+    private InputPort input(String code, String name, String dataType) {
+        return new InputPort(code, name, dataType, true, false);
+    }
+
+    private OutputPort output(String code, String name, String dataType) {
+        return new OutputPort(code, name, dataType);
+    }
+}
+```
+
+---
+
+# 十一、前端增加左侧节点库
+
+这里我把 `App.vue` 更新为：
+
+- 左侧显示节点库
+- 点击节点即可添加到画布
+- 节点可拖动
+- 端口可连线
+- 可执行流程
+- 可查看执行结果
+
+完整替换：
+
+```text
+frontend/src/App.vue
+```
+
+```vue
+<script setup>
+import { computed, onMounted, ref, markRaw } from 'vue'
+import { VueFlow } from '@vue-flow/core'
+import axios from 'axios'
+import FlowNode from './components/FlowNode.vue'
+
+const nodeTypes = {
+  flowNode: markRaw(FlowNode)
+}
+
+const nodes = ref([])
+const edges = ref([])
+const result = ref(null)
+const message = ref('')
+
+const templates = ref([])
+
+let nodeSeq = 0
+
+const groupedTemplates = computed(() => {
+  const map = new Map()
+
+  for (const template of templates.value) {
+    const category = template.category || '通用'
+
+    if (!map.has(category)) {
+      map.set(category, [])
+    }
+
+    map.get(category).push(template)
+  }
+
+  return Array.from(map.entries()).map(([category, items]) => {
+    return {
+      category,
+      items
+    }
+  })
+})
+
+onMounted(() => {
+  loadDemo()
+  loadNodeTemplates()
+})
+
+async function loadNodeTemplates() {
+  try {
+    const response = await axios.get('/api/flows/node-templates')
+    templates.value = response.data
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+async function loadDemo() {
+  try {
+    const response = await axios.get('/api/flows/demo')
+    applyFlow(response.data)
+    message.value = '示例流程加载成功'
+  } catch (error) {
+    message.value = '加载失败，请先启动后端：' + error.message
+  }
+}
+
+function applyFlow(data) {
+  nodes.value = (data.nodes || []).map(node => {
+    return {
+      id: node.id,
+      type: 'flowNode',
+      draggable: true,
+      position: node.position || { x: 0, y: 0 },
+      data: {
+        label: node.name,
+        backendType: node.type,
+        config: node.config || {},
+        inputPorts: node.inputPorts || [],
+        outputPorts: node.outputPorts || [],
+        outputs: null,
+        status: null,
+        errorMessage: null
+      }
+    }
+  })
+
+  edges.value = (data.edges || []).map(edge => {
+    return {
+      id: edge.id,
+      source: edge.sourceNodeId,
+      target: edge.targetNodeId,
+      sourceHandle: edge.sourcePort,
+      targetHandle: edge.targetPort
+    }
+  })
+}
+
+function addNode(template) {
+  nodeSeq++
+
+  const id = `${template.code}_${nodeSeq}`
+
+  const node = {
+    id,
+    type: 'flowNode',
+    draggable: true,
+    position: {
+      x: 160 + nodeSeq * 50,
+      y: 120 + nodeSeq * 50
+    },
+    data: {
+      label: template.name,
+      backendType: template.nodeType,
+      config: JSON.parse(JSON.stringify(template.defaultConfig || {})),
+      inputPorts: template.inputPorts || [],
+      outputPorts: template.outputPorts || [],
+      outputs: null,
+      status: null,
+      errorMessage: null
+    }
+  }
+
+  nodes.value = [...nodes.value, node]
+}
+
+function onConnect(params) {
+  const edge = {
+    id: 'edge_' + Date.now(),
+    source: params.source,
+    target: params.target,
+    sourceHandle: params.sourceHandle,
+    targetHandle: params.targetHandle
+  }
+
+  edges.value = [...edges.value, edge]
+}
+
+async function executeFlow() {
+  try {
+    const payload = buildPayload()
+
+    const response = await axios.post('/api/flows/execute', payload)
+    result.value = response.data
+
+    nodes.value = nodes.value.map(node => {
+      const nodeResult = response.data.nodeResults?.[node.id]
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          status: nodeResult?.status || null,
+          outputs: nodeResult?.outputs || null,
+          errorMessage: nodeResult?.errorMessage || null
+        }
+      }
+    })
+
+    message.value = '执行完成：' + response.data.status
+  } catch (error) {
+    message.value = '执行失败：' + error.message
+  }
+}
+
+function buildPayload() {
+  return {
+    flowId: 'demo_flow',
+    name: '前端提交流程',
+    nodes: nodes.value.map(node => {
+      return {
+        id: node.id,
+        type: node.data.backendType,
+        name: node.data.label,
+        position: node.position,
+        config: node.data.config,
+        inputPorts: node.data.inputPorts,
+        outputPorts: node.data.outputPorts
+      }
+    }),
+    edges: edges.value.map(edge => {
+      return {
+        id: edge.id,
+        sourceNodeId: edge.source,
+        sourcePort: edge.sourceHandle ?? 'value',
+        targetNodeId: edge.target,
+        targetPort: edge.targetHandle ?? 'value'
+      }
+    })
+  }
+}
+</script>
+
+<template>
+  <div class="app">
+    <aside class="palette">
+      <h2>节点库</h2>
+
+      <div v-if="groupedTemplates.length === 0" class="empty">
+        暂无节点
+      </div>
+
+      <div
+          v-for="group in groupedTemplates"
+          :key="group.category"
+          class="category"
+      >
+        <h3>{{ group.category }}</h3>
+
+        <div
+            v-for="template in group.items"
+            :key="template.code"
+            class="template"
+            @click="addNode(template)"
+        >
+          <div class="template-name">{{ template.name }}</div>
+          <div class="template-desc">{{ template.description }}</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="canvas">
+      <VueFlow
+          :nodes="nodes"
+          :edges="edges"
+          :node-types="nodeTypes"
+          fit-view-on-init
+          @connect="onConnect"
+      />
+    </main>
+
+    <aside class="sidebar">
+      <h2>执行</h2>
+
+      <div class="button-group">
+        <button @click="loadDemo">加载示例</button>
+        <button @click="executeFlow">执行流程</button>
+      </div>
+
+      <div class="message">{{ message }}</div>
+
+      <h3>执行结果</h3>
+      <pre class="result">{{ result }}</pre>
+    </aside>
+  </div>
+</template>
+
+<style>
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  height: 100%;
+}
+
+.palette {
+  width: 280px;
+  padding: 14px;
+  border-right: 1px solid #ddd;
+  overflow: auto;
+  background: #f7f7f7;
+}
+
+.palette h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.category {
+  margin-bottom: 16px;
+}
+
+.category h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #555;
+}
+
+.template {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid #d5d5d5;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.template:hover {
+  border-color: #409eff;
+}
+
+.template-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.template-desc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #777;
+}
+
+.empty {
+  color: #888;
+  font-size: 13px;
+}
+
+.canvas {
+  flex: 1;
+}
+
+.sidebar {
+  width: 360px;
+  padding: 14px;
+  border-left: 1px solid #ddd;
+  overflow: auto;
+  background: #fafafa;
+}
+
+.button-group {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+button {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.message {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.result {
+  background: #ffffff;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  min-height: 200px;
+  max-height: 520px;
+  overflow: auto;
+}
+</style>
+```
+
+---
+
+# 十二、启动测试
+
+---
+
+## 1. 启动后端
+
+```bash
+cd backend
+mvn spring-boot:run
+```
+
+---
+
+## 2. 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+---
+
+## 3. 打开页面
+
+```text
+http://localhost:5173
+```
+
+你会看到：
+
+左侧节点库：
+
+```text
+计算
+  价格数量相乘
+  折扣金额计算
+```
+
+点击任意节点，即可添加到画布。
+
+然后可以：
+
+- 拖动节点
+- 从输出端口连线到输入端口
+- 点击执行流程
+- 查看每个节点输出
+
+---
+
+# 十三、如何包装你现有的计算方法
+
+假设你现在已经有一个方法：
+
+```java
+@Service
+public class OrderService {
+
+    public OrderAmountResult calculateOrderAmount(Order order) {
+        // 现有逻辑
+    }
+}
+```
+
+你可以这样做。
+
+---
+
+## 方式一：直接在现有方法上加注解
+
+如果这个方法本身就可以作为节点：
+
+```java
+@Service
+public class OrderService {
+
+    @FlowNode(
+            code = "calculateOrderAmount",
+            name = "计算订单金额",
+            category = "订单"
+    )
+    public OrderAmountResult calculateOrderAmount(
+            @FlowInput(value = "order", name = "订单") Order order
+    ) {
+        // 现有逻辑
+        return new OrderAmountResult(...);
+    }
+}
+```
+
+如果 `OrderAmountResult` 是一个 record：
+
+```java
+public record OrderAmountResult(
+        double totalAmount,
+        double discountAmount,
+        double payAmount
+) {
+}
+```
+
+那么节点输出端口会自动变成：
+
+```text
+totalAmount
+discountAmount
+payAmount
+```
+
+---
+
+## 方式二：加一个包装方法
+
+如果你不想污染原有业务方法，可以写一个包装类。
+
+```java
+@Service
+public class OrderFlowNodes {
+
+    private final OrderService orderService;
+
+    public OrderFlowNodes(OrderService orderService) {
+        this.orderService = orderService;
+    }
+
+    @FlowNode(
+            code = "calculateOrderAmount",
+            name = "计算订单金额",
+            category = "订单"
+    )
+    public OrderAmountResult calculateOrderAmount(
+            @FlowInput(value = "order", name = "订单") Order order
+    ) {
+        return orderService.calculateOrderAmount(order);
+    }
+}
+```
+
+这是我最推荐的方式。
+
+原因：
+
+- 业务方法保持干净
+- 节点元数据单独管理
+- 可以做参数适配
+- 可以做结果适配
+- 不会影响原有业务调用
+
+---
+
+# 十四、输入输出来源怎么接
+
+你现在已经有：
+
+```text
+INPUT_MANUAL
+INPUT_JSON
+OUTPUT
+METHOD
+```
+
+所以一个完整流程可以是：
+
+```text
+INPUT_JSON -> METHOD -> OUTPUT
+```
+
+例如：
+
+```text
+JSON输入订单
+     ↓
+计算订单金额
+     ↓
+输出节点
+```
+
+如果方法节点需要多个输入：
+
+```java
+@FlowNode(code = "calculateTotal", name = "计算总金额")
+public TotalResult calculateTotal(
+        @FlowInput("price") double price,
+        @FlowInput("quantity") int quantity,
+        @FlowInput("discount") double discount
+) {
+    // ...
+}
+```
+
+前端连线：
+
+```text
+价格节点 -> price
+数量节点 -> quantity
+折扣节点 -> discount
+```
+
+---
+
+# 十五、如果某个输入不连线，可以使用固定值
+
+`MethodNodeExecutor` 里已经支持：
+
+```json
+{
+  "methodCode": "discountAmount",
+  "inputValues": {
+    "discountRate": 0.9
+  }
+}
+```
+
+也就是说：
+
+- 如果某个输入端口有连线，就用上游输出
+- 如果没有连线，可以从节点配置的 `inputValues` 里取
+
+例如：
+
+```text
+amount 来自上游
+discountRate 固定为 0.9
+```
+
+后续你可以在前端节点配置面板里加一个表单，用来配置这些固定值。
+
+---
+
+# 十六、关于方法参数名的注意事项
+
+如果你这样写：
+
+```java
+public double multiply(double price, int quantity)
+```
+
+没有加 `@FlowInput`，系统会尝试用参数名：
+
+```text
+price
+quantity
+```
+
+但前提是编译时保留参数名。
+
+所以建议：
+
+```xml
+<configuration>
+    <parameters>true</parameters>
+</configuration>
+```
+
+或者显式写：
+
+```java
+public double multiply(
+        @FlowInput("price") double price,
+        @FlowInput("quantity") int quantity
+)
+```
+
+显式写更稳定。
+
+---
+
+# 十七、输出端口的几种规则
+
+---
+
+## 1. 手动指定输出端口
+
+适合返回 `Map` 的场景：
+
+```java
+@FlowNode(
+        code = "xxx",
+        name = "xxx",
+        outputs = {
+                @FlowOutput(code = "result", name = "结果", dataType = "NUMBER"),
+                @FlowOutput(code = "message", name = "信息", dataType = "STRING")
+        }
+)
+public Map<String, Object> xxx() {
+    return Map.of(
+            "result", 100,
+            "message", "成功"
+    );
+}
+```
+
+---
+
+## 2. 返回 Record 自动识别输出端口
+
+```java
+@FlowNode(code = "xxx", name = "xxx")
+public XxxResult xxx() {
+    return new XxxResult(...);
+}
+
+public record XxxResult(
+        double amount,
+        String message
+) {
+}
+```
+
+输出端口自动为：
+
+```text
+amount
+message
+```
+
+---
+
+## 3. 返回基本类型
+
+```java
+@FlowNode(code = "xxx", name = "xxx")
+public double xxx() {
+    return 100;
+}
+```
+
+输出端口默认：
+
+```text
+result
+```
+
+---
+
+# 十八、你现在得到的能力
+
+现在你的系统已经具备：
+
+```text
+@FlowNode 注解
+启动自动扫描
+自动生成节点模板
+左侧节点库展示
+方法参数自动输入端口
+返回值自动输出端口
+方法节点反射执行
+前端添加节点
+自由连线
+DAG 执行
+节点结果展示
+```
+
+也就是说，你已经从「写死几个节点」升级成了：
+
+> **可配置、可扩展、可自由编排的方法节点引擎。**
+
+---
+
+# 十九、后续可以继续增强的方向
+
+## 1. 左侧节点拖拽到画布
+
+当前 Demo 是点击添加。
+
+后续可以改成：
+
+```text
+左侧节点 draggable
+画布 ondrop
+根据鼠标坐标创建节点
+```
+
+---
+
+## 2. 节点配置面板
+
+点击节点后右侧显示表单：
+
+- 固定输入值
+- 方法参数默认值
+- 节点名称
+- 是否跳过
+- 失败策略
+
+---
+
+## 3. 节点分组和搜索
+
+左侧节点库增加：
+
+```text
+搜索框
+分类折叠
+节点图标
+```
+
+---
+
+## 4. 支持表达式输入
+
+例如：
+
+```text
+${node_1.result} * 0.9
+```
+
+---
+
+## 5. 支持 Excel 输入节点
+
+新增：
+
+```java
+@FlowNode(
+        code = "readExcel",
+        name = "读取Excel",
+        category = "数据输入"
+)
+public Map<String, Object> readExcel(
+        @FlowInput("fileId") String fileId,
+        @FlowInput("sheetName") String sheetName
+) {
+    // EasyExcel 读取
+}
+```
+
+这样 Excel 读取也会变成普通节点。
+
+---
+
+# 二十、一句话总结
+
+你可以用这套模式把任何现有计算方法变成节点：
+
+```java
+@FlowNode(
+        code = "节点编码",
+        name = "节点名称",
+        category = "分类"
+)
+public 返回值 方法名(
+        @FlowInput("输入1") 类型 参数1,
+        @FlowInput("输入2") 类型 参数2
+) {
+    // 原有计算逻辑
+}
+```
+
+启动后自动注册成节点，前端左侧展示，可添加、可连线、可执行。
