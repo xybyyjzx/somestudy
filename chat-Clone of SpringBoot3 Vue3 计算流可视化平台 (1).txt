@@ -1,0 +1,2039 @@
+### USER
+我有一套很复杂的计算逻辑，需要调用很多个方法，我想可视化一下。想着弄一个计算引擎平台。可以展示节点，拖动节点连线，执行flow，新建flow，保存flow，节点可以修改名称，描述等。然后节点主要有三个类型，输入 输出 计算。输入节点可以支持json，excel，htttp db等 现在最小版本只需要json。输出节点和输入节点类似。计算节点可以有多个输入节点，也可以有多个输出节点。最好弄一个注解，可以把现有的方法直接变成节点。左侧展示节点，中间展示画布，点击画布上节点，可以修改节点一些配置，比如参数，名称，描述等。节点输入输出连线都是一个端口，但是可以分出不同的线来连接其他节点。我用的springboot3 vue3 typescript。这个计算平台可以可视化现有的一套flow计算逻辑，也可以根据节点新建flow。先帮我实现一个最小版本。
+
+### ASSISTANT
+# Flow 计算引擎平台 — 最小可用版本
+
+下面给你一套完整可跑的最小版本，技术栈完全按你的要求：**Spring Boot 3 + Vue 3 + TypeScript**。
+
+## 一、整体设计
+
+**核心思路：**
+
+1. **图数据结构**：画布本质是一张图 `{ nodes, edges }`，前端用 [Vue Flow](https://vueflow.dev/) 渲染，后端存同一份 JSON，执行时解析它
+2. **注解驱动节点**：`@FlowNode` 注解打在任意 Spring Bean 的方法上，启动时自动扫描注册成节点，左侧节点库自动出现
+3. **执行引擎**：拓扑排序（Kahn）→ 按序执行 → 上游输出沿边流向下游输入，天然支持环检测、一输入多输出、多输入汇聚
+4. **单端口多连线**：节点只有一个输入/输出端口，Vue Flow 原生支持一个端口拉出任意多条边
+
+**参数注入规则**（注解方法签名很灵活）：
+
+| 方法参数类型 | 引擎注入的内容 |
+|---|---|
+| `Map<String,Object>` | 节点在画布上配置的参数 |
+| `List<Object>` | 所有上游节点的输出列表 |
+| `NodeContext` | 完整上下文（id/名称/配置/输入） |
+| 其他类型 | 第一个上游输入 |
+
+---
+
+## 二、后端代码
+
+```
+flow-engine-backend/
+├── pom.xml
+└── src/main/java/com/example/flowengine/
+    ├── FlowEngineApplication.java
+    ├── annotation/{FlowNode, ConfigField}.java
+    ├── model/{NodeType, NodeDefinition, FlowNodeData, GraphNode, GraphEdge, FlowGraph, Flow}.java
+    ├── registry/NodeRegistry.java
+    ├── engine/{NodeContext, FlowExecutionEngine}.java
+    ├── nodes/BuiltinNodes.java
+    ├── repository/FlowRepository.java
+    ├── service/FlowService.java
+    ├── controller/{FlowController, NodeController}.java
+    └── config/{WebConfig, GlobalExceptionHandler}.java
+```
+
+### pom.xml
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+    </parent>
+    <groupId>com.example</groupId>
+    <artifactId>flow-engine-backend</artifactId>
+    <version>0.1.0</version>
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+### FlowEngineApplication.java
+
+```java
+package com.example.flowengine;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class FlowEngineApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(FlowEngineApplication.class, args);
+    }
+}
+```
+
+### annotation/FlowNode.java —— 核心注解
+
+```java
+package com.example.flowengine.annotation;
+
+import com.example.flowengine.model.NodeType;
+
+import java.lang.annotation.*;
+
+/**
+ * 打在 Spring Bean 的方法上，该方法自动变成一个流程节点。
+ */
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+public @interface FlowNode {
+    /** 节点显示名 */
+    String name();
+    String description() default "";
+    NodeType type() default NodeType.COMPUTE;
+    String category() default "通用";
+    /** 声明该节点在画布上可配置的参数，前端自动渲染表单 */
+    ConfigField[] fields() default {};
+}
+```
+
+### annotation/ConfigField.java
+
+```java
+package com.example.flowengine.annotation;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target({})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ConfigField {
+    String key();
+    String label() default "";
+    FieldType type() default FieldType.TEXT;
+    String defaultValue() default "";
+
+    enum FieldType { TEXT, TEXTAREA, NUMBER }
+}
+```
+
+### model 包
+
+```java
+// NodeType.java
+package com.example.flowengine.model;
+
+public enum NodeType { INPUT, COMPUTE, OUTPUT }
+```
+
+```java
+// NodeDefinition.java —— 节点库里的节点定义
+package com.example.flowengine.model;
+
+import java.util.List;
+
+public record NodeDefinition(
+        String id,
+        String name,
+        String description,
+        NodeType type,
+        String category,
+        List<ConfigFieldDef> fields
+) {
+    public record ConfigFieldDef(String key, String label, String type, String defaultValue) {}
+}
+```
+
+```java
+// FlowNodeData.java —— 画布节点 data 字段（与前端约定一致）
+package com.example.flowengine.model;
+
+import java.util.Map;
+
+public record FlowNodeData(
+        String defId,          // 指向哪个节点定义
+        NodeType nodeType,     // INPUT / COMPUTE / OUTPUT
+        String defName,
+        String name,           // 用户可改的名称
+        String description,    // 用户可改的描述
+        Map<String, Object> config
+) {}
+```
+
+```java
+// GraphNode.java
+package com.example.flowengine.model;
+
+import java.util.Map;
+
+public record GraphNode(String id, String type, FlowNodeData data, Map<String, Object> position) {}
+```
+
+```java
+// GraphEdge.java
+package com.example.flowengine.model;
+
+public record GraphEdge(String id, String source, String target) {}
+```
+
+```java
+// FlowGraph.java
+package com.example.flowengine.model;
+
+import java.util.List;
+
+public record FlowGraph(List<GraphNode> nodes, List<GraphEdge> edges) {}
+```
+
+```java
+// Flow.java
+package com.example.flowengine.model;
+
+import java.time.Instant;
+
+public class Flow {
+    private String id;
+    private String name;
+    private String description;
+    private FlowGraph graph;
+    private Instant updatedAt;
+
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+    public FlowGraph getGraph() { return graph; }
+    public void setGraph(FlowGraph graph) { this.graph = graph; }
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+}
+```
+
+### engine/NodeContext.java
+
+```java
+package com.example.flowengine.engine;
+
+import java.util.List;
+import java.util.Map;
+
+public record NodeContext(
+        String nodeId,
+        String nodeName,
+        Map<String, Object> config,
+        List<Object> inputs   // 所有上游节点的输出
+) {}
+```
+
+### registry/NodeRegistry.java —— 注解扫描与反射调用
+
+```java
+package com.example.flowengine.registry;
+
+import com.example.flowengine.annotation.ConfigField;
+import com.example.flowengine.annotation.FlowNode;
+import com.example.flowengine.engine.NodeContext;
+import com.example.flowengine.model.NodeDefinition;
+import com.example.flowengine.model.NodeDefinition.ConfigFieldDef;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
+import org.springframework.util.ClassUtils;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.*;
+
+@Component
+public class NodeRegistry {
+
+    private static final Logger log = LoggerFactory.getLogger(NodeRegistry.class);
+
+    private record RegisteredNode(NodeDefinition definition, Object bean, Method method) {}
+
+    private final ApplicationContext applicationContext;
+    private final Map<String, RegisteredNode> nodes = new LinkedHashMap<>();
+
+    public NodeRegistry(ApplicationContext applicationContext) {
+        this.applicationContext = applicationContext;
+    }
+
+    /** 启动时扫描所有 Bean 方法上的 @FlowNode */
+    @PostConstruct
+    void scan() {
+        for (String beanName : applicationContext.getBeanDefinitionNames()) {
+            Object bean;
+            try {
+                bean = applicationContext.getBean(beanName);
+            } catch (Exception e) {
+                continue;
+            }
+            Class<?> targetClass = ClassUtils.getUserClass(bean.getClass());
+            if (skip(targetClass)) continue;
+
+            for (Method method : targetClass.getMethods()) {
+                FlowNode ann = method.getAnnotation(FlowNode.class);
+                if (ann == null || Modifier.isStatic(method.getModifiers())) continue;
+
+                String id = beanName + "." + method.getName();
+                if (nodes.containsKey(id)) {
+                    throw new IllegalStateException("节点ID重复: " + id);
+                }
+                method.setAccessible(true);
+
+                List<ConfigFieldDef> fields = Arrays.stream(ann.fields())
+                        .map(f -> new ConfigFieldDef(
+                                f.key(),
+                                f.label().isEmpty() ? f.key() : f.label(),
+                                f.type().name().toLowerCase(),
+                                f.defaultValue()))
+                        .toList();
+
+                NodeDefinition def = new NodeDefinition(
+                        id, ann.name(), ann.description(), ann.type(), ann.category(), fields);
+                nodes.put(id, new RegisteredNode(def, bean, method));
+                log.info("注册流程节点: {} ({})", ann.name(), id);
+            }
+        }
+    }
+
+    private boolean skip(Class<?> clazz) {
+        String name = clazz.getName();
+        return name.startsWith("org.springframework") || name.startsWith("java.")
+                || name.startsWith("jdk.") || name.startsWith("com.sun")
+                || name.contains("$$SpringCGLIB$$");
+    }
+
+    public List<NodeDefinition> getDefinitions() {
+        return nodes.values().stream().map(RegisteredNode::definition).toList();
+    }
+
+    public NodeDefinition getDefinition(String id) {
+        RegisteredNode n = nodes.get(id);
+        return n == null ? null : n.definition();
+    }
+
+    /** 反射执行节点方法 */
+    public Object execute(String defId, NodeContext context) throws Exception {
+        RegisteredNode n = nodes.get(defId);
+        if (n == null) throw new IllegalArgumentException("未找到节点定义: " + defId);
+        try {
+            return n.method().invoke(n.bean(), resolveArgs(n.method(), context));
+        } catch (InvocationTargetException e) {
+            throw e.getCause() instanceof Exception ex ? ex : e;
+        }
+    }
+
+    /** 按参数类型自动注入：Map→配置，List→全部上游输入，其他→第一个上游输入 */
+    private Object[] resolveArgs(Method method, NodeContext ctx) {
+        Class<?>[] types = method.getParameterTypes();
+        Object[] args = new Object[types.length];
+        for (int i = 0; i < types.length; i++) {
+            Class<?> t = types[i];
+            if (NodeContext.class.isAssignableFrom(t)) args[i] = ctx;
+            else if (Map.class.isAssignableFrom(t)) args[i] = ctx.config() == null ? Map.of() : ctx.config();
+            else if (List.class.isAssignableFrom(t)) args[i] = ctx.inputs() == null ? List.of() : ctx.inputs();
+            else args[i] = (ctx.inputs() == null || ctx.inputs().isEmpty()) ? null : ctx.inputs().get(0);
+        }
+        return args;
+    }
+}
+```
+
+### engine/FlowExecutionEngine.java —— 执行引擎
+
+```java
+package com.example.flowengine.engine;
+
+import com.example.flowengine.model.*;
+import com.example.flowengine.registry.NodeRegistry;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+public class FlowExecutionEngine {
+
+    private final NodeRegistry registry;
+
+    public FlowExecutionEngine(NodeRegistry registry) {
+        this.registry = registry;
+    }
+
+    public record NodeTrace(String nodeId, String nodeName, String defName, String status,
+                            long durationMs, Object output, String error) {}
+
+    public record ExecutionResult(boolean success, String error, List<NodeTrace> traces,
+                                  Map<String, Object> outputs, long durationMs) {}
+
+    public ExecutionResult execute(FlowGraph graph) {
+        long start = System.currentTimeMillis();
+        List<GraphNode> nodes = graph == null || graph.nodes() == null ? List.of() : graph.nodes();
+        List<GraphEdge> edges = graph == null || graph.edges() == null ? List.of() : graph.edges();
+        List<NodeTrace> traces = new ArrayList<>();
+
+        if (nodes.isEmpty()) {
+            return new ExecutionResult(false, "流程中没有节点", traces, Map.of(), 0);
+        }
+
+        Map<String, GraphNode> nodeById = nodes.stream()
+                .collect(Collectors.toMap(GraphNode::id, n -> n));
+        for (GraphEdge e : edges) {
+            if (!nodeById.containsKey(e.source()) || !nodeById.containsKey(e.target())) {
+                return new ExecutionResult(false, "连线引用了不存在的节点: " + e.id(), traces, Map.of(), 0);
+            }
+        }
+
+        // 邻接关系 + 入度
+        Map<String, List<String>> incoming = new HashMap<>();
+        Map<String, Integer> indegree = new HashMap<>();
+        nodes.forEach(n -> indegree.put(n.id(), 0));
+        for (GraphEdge e : edges) {
+            incoming.computeIfAbsent(e.target(), k -> new ArrayList<>()).add(e.source());
+            indegree.merge(e.target(), 1, Integer::sum);
+        }
+
+        // Kahn 拓扑排序
+        Deque<String> queue = new ArrayDeque<>();
+        nodes.forEach(n -> { if (indegree.get(n.id()) == 0) queue.add(n.id()); });
+        List<String> order = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            String id = queue.poll();
+            order.add(id);
+            for (GraphEdge e : edges) {
+                if (e.source().equals(id) && indegree.merge(e.target(), -1, Integer::sum) == 0) {
+                    queue.add(e.target());
+                }
+            }
+        }
+        if (order.size() != nodes.size()) {
+            return new ExecutionResult(false, "流程中存在循环依赖，请检查连线", traces, Map.of(), 0);
+        }
+
+        Map<String, Object> outputs = new HashMap<>();
+        Map<String, String> status = new HashMap<>();
+        Map<String, Object> finalOutputs = new LinkedHashMap<>();
+        boolean allSuccess = true;
+
+        for (String id : order) {
+            GraphNode node = nodeById.get(id);
+            FlowNodeData data = node.data();
+            String nodeName = data != null && data.name() != null ? data.name() : id;
+            String defName = data != null ? data.defName() : null;
+            List<String> sources = incoming.getOrDefault(id, List.of());
+
+            // 上游失败则跳过
+            if (!sources.isEmpty() && sources.stream().anyMatch(s -> !"SUCCESS".equals(status.get(s)))) {
+                status.put(id, "SKIPPED");
+                traces.add(new NodeTrace(id, nodeName, defName, "SKIPPED", 0, null, "上游节点未成功执行"));
+                allSuccess = false;
+                continue;
+            }
+
+            NodeDefinition def = data == null ? null : registry.getDefinition(data.defId());
+            if (def == null) {
+                status.put(id, "FAILED");
+                allSuccess = false;
+                traces.add(new NodeTrace(id, nodeName, defName, "FAILED", 0, null,
+                        "未找到节点定义: " + (data == null ? "?" : data.defId())));
+                continue;
+            }
+
+            List<Object> inputs = sources.stream().map(outputs::get).collect(Collectors.toList());
+            long t0 = System.currentTimeMillis();
+            try {
+                Map<String, Object> config = data.config() == null ? Map.of() : data.config();
+                Object result = registry.execute(def.id(), new NodeContext(id, nodeName, config, inputs));
+                outputs.put(id, result);
+                status.put(id, "SUCCESS");
+                traces.add(new NodeTrace(id, nodeName, defName, "SUCCESS",
+                        System.currentTimeMillis() - t0, result, null));
+                if (def.type() == NodeType.OUTPUT) {
+                    finalOutputs.put(nodeName, result);
+                }
+            } catch (Exception ex) {
+                status.put(id, "FAILED");
+                allSuccess = false;
+                traces.add(new NodeTrace(id, nodeName, defName, "FAILED",
+                        System.currentTimeMillis() - t0, null, message(ex)));
+            }
+        }
+
+        return new ExecutionResult(allSuccess, allSuccess ? null : "部分节点执行失败",
+                traces, finalOutputs, System.currentTimeMillis() - start);
+    }
+
+    private String message(Throwable t) {
+        return t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+    }
+}
+```
+
+### nodes/BuiltinNodes.java —— 内置节点（也是注解用法示例）
+
+```java
+package com.example.flowengine.nodes;
+
+import com.example.flowengine.annotation.ConfigField;
+import com.example.flowengine.annotation.FlowNode;
+import com.example.flowengine.model.NodeType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+@Component
+public class BuiltinNodes {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // ---------- 输入节点（最小版本只做 JSON，后续可加 Excel/HTTP/DB） ----------
+
+    @FlowNode(name = "JSON输入", type = NodeType.INPUT, category = "输入",
+            description = "将配置的 JSON 文本解析为数据对象",
+            fields = @ConfigField(key = "jsonText", label = "JSON内容",
+                    type = ConfigField.FieldType.TEXTAREA, defaultValue = "{}"))
+    public Object jsonInput(Map<String, Object> config) throws Exception {
+        String text = asString(config.get("jsonText"));
+        if (text == null || text.isBlank()) return Map.of();
+        return objectMapper.readValue(text, Object.class);
+    }
+
+    // ---------- 输出节点 ----------
+
+    @FlowNode(name = "JSON输出", type = NodeType.OUTPUT, category = "输出",
+            description = "将上游结果序列化为 JSON 字符串")
+    public Object jsonOutput(List<Object> inputs) throws Exception {
+        Object payload = inputs.size() == 1 ? inputs.get(0) : inputs;
+        return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
+    }
+
+    // ---------- 计算节点 ----------
+
+    @FlowNode(name = "字段提取", category = "计算",
+            description = "从 Map 或 Map 列表中按 key 提取字段",
+            fields = @ConfigField(key = "field", label = "字段名"))
+    public Object extractField(List<Object> inputs, Map<String, Object> config) {
+        String field = asString(config.get("field"));
+        if (field == null || field.isBlank()) throw new IllegalArgumentException("缺少参数 field");
+        List<Object> result = new ArrayList<>();
+        inputs.forEach(in -> collect(in, field, result));
+        return result.size() == 1 ? result.get(0) : result;
+    }
+
+    private void collect(Object value, String field, List<Object> out) {
+        if (value instanceof Map<?, ?> map) out.add(map.get(field));
+        else if (value instanceof List<?> list) list.forEach(o -> collect(o, field, out));
+    }
+
+    @FlowNode(name = "数值求和", category = "计算", description = "对所有输入中的数值求和（支持多个输入汇聚）")
+    public Object sum(List<Object> inputs) {
+        double[] total = {0};
+        inputs.forEach(v -> sumInto(v, total));
+        return total[0] % 1 == 0 ? (long) total[0] : total[0];
+    }
+
+    private void sumInto(Object value, double[] total) {
+        if (value instanceof Number n) total[0] += n.doubleValue();
+        else if (value instanceof List<?> list) list.forEach(o -> sumInto(o, total));
+        else if (value instanceof Map<?, ?> map) map.values().forEach(v -> sumInto(v, total));
+    }
+
+    @FlowNode(name = "常量", category = "计算", description = "无需输入，输出一个配置的常量值",
+            fields = @ConfigField(key = "value", label = "常量值",
+                    type = ConfigField.FieldType.NUMBER, defaultValue = "0"))
+    public Object constant(Map<String, Object> config) {
+        return config.get("value");
+    }
+
+    private String asString(Object o) { return o == null ? null : String.valueOf(o); }
+}
+```
+
+### repository/FlowRepository.java —— 内存存储 + 种子数据
+
+```java
+package com.example.flowengine.repository;
+
+import com.example.flowengine.model.*;
+import org.springframework.stereotype.Repository;
+
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+/** 最小版本用内存存储，后续可替换为 JPA + 数据库 */
+@Repository
+public class FlowRepository {
+
+    private final Map<String, Flow> store = new ConcurrentHashMap<>();
+
+    public FlowRepository() {
+        seed();
+    }
+
+    public List<Flow> findAll() {
+        return store.values().stream()
+                .sorted(Comparator.comparing(Flow::getUpdatedAt).reversed()).toList();
+    }
+
+    public Optional<Flow> findById(String id) { return Optional.ofNullable(store.get(id)); }
+
+    public Flow save(Flow flow) {
+        flow.setUpdatedAt(Instant.now());
+        store.put(flow.getId(), flow);
+        return flow;
+    }
+
+    public void delete(String id) { store.remove(id); }
+
+    /** 种子示例：订单金额汇总（含多输入汇聚演示） */
+    private void seed() {
+        Map<String, Object> jsonConfig = new HashMap<>();
+        jsonConfig.put("jsonText", """
+                {
+                  "order": "DEMO-001",
+                  "items": [
+                    {"name": "键盘", "amount": 199},
+                    {"name": "鼠标", "amount": 99},
+                    {"name": "显示器", "amount": 1299}
+                  ]
+                }
+                """);
+
+        // 注意：defId = beanName + "." + 方法名
+        FlowGraph graph = new FlowGraph(List.of(
+                node("n1", NodeType.INPUT,   40, 180, data("builtinNodes.jsonInput",   NodeType.INPUT,   "JSON输入", "订单数据", "演示输入", jsonConfig)),
+                node("n2", NodeType.COMPUTE, 280, 80,  data("builtinNodes.extractField", NodeType.COMPUTE, "字段提取", "提取items", "", Map.of("field", "items"))),
+                node("n3", NodeType.COMPUTE, 520, 80,  data("builtinNodes.extractField", NodeType.COMPUTE, "字段提取", "提取amount", "", Map.of("field", "amount"))),
+                node("n5", NodeType.COMPUTE, 280, 320, data("builtinNodes.constant",   NodeType.COMPUTE, "常量", "运费", "", Map.of("value", 10))),
+                node("n4", NodeType.COMPUTE, 760, 200, data("builtinNodes.sum",        NodeType.COMPUTE, "数值求和", "总金额", "", Map.of())),
+                node("n6", NodeType.OUTPUT,  1000, 200, data("builtinNodes.jsonOutput", NodeType.OUTPUT, "JSON输出", "结果输出", "", Map.of()))
+        ), List.of(
+                edge("n1", "n2"), edge("n2", "n3"), edge("n3", "n4"),
+                edge("n5", "n4"), edge("n4", "n6")
+        ));
+
+        Flow flow = new Flow();
+        flow.setId("demo");
+        flow.setName("示例：订单金额汇总");
+        flow.setDescription("JSON输入 → 字段提取 → 求和（与运费常量汇聚）→ JSON输出");
+        flow.setGraph(graph);
+        flow.setUpdatedAt(Instant.now());
+        store.put(flow.getId(), flow);
+    }
+
+    private static GraphNode node(String id, NodeType type, double x, double y, FlowNodeData data) {
+        return new GraphNode(id, "flow-node", data, Map.of("x", x, "y", y));
+    }
+
+    private static FlowNodeData data(String defId, NodeType type, String defName,
+                                     String name, String description, Map<String, Object> config) {
+        return new FlowNodeData(defId, type, defName, name, description, config);
+    }
+
+    private static GraphEdge edge(String source, String target) {
+        return new GraphEdge(source + "-" + target, source, target);
+    }
+}
+```
+
+### service/FlowService.java
+
+```java
+package com.example.flowengine.service;
+
+import com.example.flowengine.model.Flow;
+import com.example.flowengine.model.FlowGraph;
+import com.example.flowengine.repository.FlowRepository;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+@Service
+public class FlowService {
+
+    private final FlowRepository repository;
+
+    public FlowService(FlowRepository repository) {
+        this.repository = repository;
+    }
+
+    public record FlowSummary(String id, String name, String description, Instant updatedAt) {}
+
+    public List<FlowSummary> list() {
+        return repository.findAll().stream()
+                .map(f -> new FlowSummary(f.getId(), f.getName(), f.getDescription(), f.getUpdatedAt()))
+                .toList();
+    }
+
+    public Flow get(String id) {
+        return repository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "流程不存在: " + id));
+    }
+
+    public Flow create(String name, String description, FlowGraph graph) {
+        Flow flow = new Flow();
+        flow.setId(UUID.randomUUID().toString().replace("-", "").substring(0, 12));
+        flow.setName(name == null || name.isBlank() ? "未命名流程" : name);
+        flow.setDescription(description);
+        flow.setGraph(graph == null ? new FlowGraph(List.of(), List.of()) : graph);
+        return repository.save(flow);
+    }
+
+    public Flow update(String id, String name, String description, FlowGraph graph) {
+        Flow flow = get(id);
+        if (name != null && !name.isBlank()) flow.setName(name);
+        flow.setDescription(description);
+        if (graph != null) flow.setGraph(graph);
+        return repository.save(flow);
+    }
+
+    public void delete(String id) {
+        get(id);
+        repository.delete(id);
+    }
+}
+```
+
+### controller/FlowController.java
+
+```java
+package com.example.flowengine.controller;
+
+import com.example.flowengine.engine.FlowExecutionEngine;
+import com.example.flowengine.model.Flow;
+import com.example.flowengine.model.FlowGraph;
+import com.example.flowengine.service.FlowService;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/flows")
+public class FlowController {
+
+    private final FlowService flowService;
+    private final FlowExecutionEngine engine;
+
+    public FlowController(FlowService flowService, FlowExecutionEngine engine) {
+        this.flowService = flowService;
+        this.engine = engine;
+    }
+
+    public record FlowSaveRequest(String name, String description, FlowGraph graph) {}
+
+    @GetMapping
+    public List<FlowService.FlowSummary> list() {
+        return flowService.list();
+    }
+
+    @GetMapping("/{id}")
+    public Flow get(@PathVariable String id) {
+        return flowService.get(id);
+    }
+
+    @PostMapping
+    public Flow create(@RequestBody FlowSaveRequest req) {
+        return flowService.create(req.name(), req.description(), req.graph());
+    }
+
+    @PutMapping("/{id}")
+    public Flow update(@PathVariable String id, @RequestBody FlowSaveRequest req) {
+        return flowService.update(id, req.name(), req.description(), req.graph());
+    }
+
+    @DeleteMapping("/{id}")
+    public void delete(@PathVariable String id) {
+        flowService.delete(id);
+    }
+
+    /** 直接执行当前画布（无需先保存） */
+    @PostMapping("/execute")
+    public FlowExecutionEngine.ExecutionResult execute(@RequestBody FlowSaveRequest req) {
+        return engine.execute(req.graph());
+    }
+}
+```
+
+### controller/NodeController.java
+
+```java
+package com.example.flowengine.controller;
+
+import com.example.flowengine.model.NodeDefinition;
+import com.example.flowengine.registry.NodeRegistry;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/nodes")
+public class NodeController {
+
+    private final NodeRegistry registry;
+
+    public NodeController(NodeRegistry registry) {
+        this.registry = registry;
+    }
+
+    @GetMapping("/definitions")
+    public List<NodeDefinition> definitions() {
+        return registry.getDefinitions();
+    }
+}
+```
+
+### config/WebConfig.java + GlobalExceptionHandler.java
+
+```java
+package com.example.flowengine.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/api/**").allowedOriginPatterns("*").allowedMethods("*");
+    }
+}
+```
+
+```java
+package com.example.flowengine.config;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.Map;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<Map<String, Object>> handleStatus(ResponseStatusException e) {
+        return ResponseEntity.status(e.getStatusCode())
+                .body(Map.of("error", e.getReason() == null ? String.valueOf(e.getMessage()) : e.getReason()));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, Object>> handle(Exception e) {
+        return ResponseEntity.status(500)
+                .body(Map.of("error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+    }
+}
+```
+
+### application.yml
+
+```yaml
+server:
+  port: 8080
+spring:
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+```
+
+---
+
+## 三、前端代码
+
+```
+flow-engine-ui/
+├── package.json / vite.config.ts / tsconfig.json / index.html
+└── src/
+    ├── main.ts / style.css / vite-env.d.ts / types.ts / api.ts
+    ├── App.vue
+    └── components/
+        ├── NodePalette.vue      # 左侧节点库
+        ├── FlowCanvas.vue       # 中间画布
+        ├── FlowNode.vue         # 自定义节点
+        ├── NodeConfigPanel.vue  # 右侧配置面板
+        └── ExecutionPanel.vue   # 底部执行结果
+```
+
+### package.json
+
+```json
+{
+  "name": "flow-engine-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@vue-flow/background": "^1.3.0",
+    "@vue-flow/controls": "^1.3.0",
+    "@vue-flow/core": "^1.41.0",
+    "axios": "^1.7.7",
+    "vue": "^3.5.12"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.10",
+    "vue-tsc": "^2.1.10"
+  }
+}
+```
+
+### vite.config.ts
+
+```ts
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': { target: 'http://localhost:8080', changeOrigin: true }
+    }
+  }
+})
+```
+
+### tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue"]
+}
+```
+
+### index.html
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flow 计算引擎</title>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+```
+
+### src/vite-env.d.ts
+
+```ts
+/// <reference types="vite/client" />
+declare module '*.vue' {
+  import type { DefineComponent } from 'vue'
+  const component: DefineComponent<Record<string, unknown>, Record<string, unknown>, unknown>
+  export default component
+}
+```
+
+### src/types.ts
+
+```ts
+export type NodeType = 'INPUT' | 'COMPUTE' | 'OUTPUT'
+
+export interface ConfigFieldDef {
+  key: string
+  label: string
+  type: 'text' | 'textarea' | 'number'
+  defaultValue?: string
+}
+
+export interface NodeDefinition {
+  id: string
+  name: string
+  description: string
+  type: NodeType
+  category: string
+  fields: ConfigFieldDef[]
+}
+
+export interface FlowNodeData {
+  defId: string
+  nodeType: NodeType
+  defName: string
+  name: string
+  description: string
+  config: Record<string, any>
+  status?: 'success' | 'failed' | 'skipped'
+}
+
+export interface FlowGraph {
+  nodes: any[]
+  edges: any[]
+}
+
+export interface FlowSummary {
+  id: string
+  name: string
+  description?: string
+  updatedAt: string
+}
+
+export interface FlowDetail {
+  id: string
+  name: string
+  description: string
+  graph: FlowGraph
+  updatedAt: string
+}
+
+export interface NodeTrace {
+  nodeId: string
+  nodeName: string
+  defName?: string
+  status: 'SUCCESS' | 'FAILED' | 'SKIPPED'
+  durationMs: number
+  output: any
+  error?: string
+}
+
+export interface ExecutionResult {
+  success: boolean
+  error?: string
+  traces: NodeTrace[]
+  outputs: Record<string, any>
+  durationMs: number
+}
+```
+
+### src/api.ts
+
+```ts
+import axios from 'axios'
+import type { ExecutionResult, FlowDetail, FlowGraph, FlowSummary, NodeDefinition } from './types'
+
+const http = axios.create({ baseURL: '/api', timeout: 30000 })
+
+export interface FlowSaveBody {
+  name: string
+  description: string
+  graph: FlowGraph
+}
+
+export const fetchNodeDefinitions = () =>
+  http.get<NodeDefinition[]>('/nodes/definitions').then(r => r.data)
+
+export const fetchFlows = () =>
+  http.get<FlowSummary[]>('/flows').then(r => r.data)
+
+export const fetchFlow = (id: string) =>
+  http.get<FlowDetail>(`/flows/${id}`).then(r => r.data)
+
+export const createFlow = (body: FlowSaveBody) =>
+  http.post<FlowDetail>('/flows', body).then(r => r.data)
+
+export const saveFlow = (id: string, body: FlowSaveBody) =>
+  http.put<FlowDetail>(`/flows/${id}`, body).then(r => r.data)
+
+export const deleteFlow = (id: string) => http.delete(`/flows/${id}`)
+
+export const executeGraph = (body: FlowSaveBody) =>
+  http.post<ExecutionResult>('/flows/execute', body).then(r => r.data)
+```
+
+### src/main.ts
+
+```ts
+import { createApp } from 'vue'
+import App from './App.vue'
+import '@vue-flow/core/dist/style.css'
+import '@vue-flow/core/dist/theme-default.css'
+import '@vue-flow/controls/dist/style.css'
+import './style.css'
+
+createApp(App).mount('#app')
+```
+
+### src/style.css
+
+```css
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body {
+  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  color: #1e293b;
+}
+button {
+  padding: 6px 14px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+button:hover { background: #f3f4f6; }
+button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+button.primary:hover { background: #1d4ed8; }
+button.success { background: #059669; border-color: #059669; color: #fff; }
+button.success:hover { background: #047857; }
+button.danger-ghost { color: #dc2626; border-color: #fca5a5; }
+button.danger-ghost:hover { background: #fef2f2; }
+input, select {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: #2563eb; }
+textarea {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+  width: 100%;
+  resize: vertical;
+  outline: none;
+}
+```
+
+### src/App.vue
+
+```vue
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import type { GraphNode } from '@vue-flow/core'
+import NodePalette from './components/NodePalette.vue'
+import FlowCanvas from './components/FlowCanvas.vue'
+import NodeConfigPanel from './components/NodeConfigPanel.vue'
+import ExecutionPanel from './components/ExecutionPanel.vue'
+import * as api from './api'
+import type { ExecutionResult, FlowSummary, NodeDefinition } from './types'
+
+const canvasRef = ref<InstanceType<typeof FlowCanvas>>()
+const definitions = ref<NodeDefinition[]>([])
+const flows = ref<FlowSummary[]>([])
+const currentFlowId = ref('')
+const flowName = ref('未命名流程')
+const flowDescription = ref('')
+const selectedNode = ref<GraphNode | null>(null)
+const execResult = ref<ExecutionResult | null>(null)
+const toast = ref('')
+
+const defById = computed(() => new Map(definitions.value.map(d => [d.id, d])))
+
+onMounted(async () => {
+  definitions.value = await api.fetchNodeDefinitions()
+  await loadFlows()
+  if (flows.value.length) await loadFlow(flows.value[0].id)
+})
+
+async function loadFlows() {
+  flows.value = await api.fetchFlows()
+}
+
+async function loadFlow(id: string) {
+  const flow = await api.fetchFlow(id)
+  currentFlowId.value = flow.id
+  flowName.value = flow.name
+  flowDescription.value = flow.description ?? ''
+  canvasRef.value?.loadGraph(flow.graph)
+  selectedNode.value = null
+  execResult.value = null
+}
+
+function onFlowSelectChange() {
+  if (currentFlowId.value) loadFlow(currentFlowId.value)
+}
+
+function newFlow() {
+  currentFlowId.value = ''
+  flowName.value = '未命名流程'
+  flowDescription.value = ''
+  canvasRef.value?.clear()
+  selectedNode.value = null
+  execResult.value = null
+}
+
+async function save() {
+  const body = {
+    name: flowName.value,
+    description: flowDescription.value,
+    graph: canvasRef.value!.getGraph()
+  }
+  try {
+    if (currentFlowId.value) {
+      await api.saveFlow(currentFlowId.value, body)
+    } else {
+      const created = await api.createFlow(body)
+      currentFlowId.value = created.id
+    }
+    await loadFlows()
+    showToast('保存成功')
+  } catch (e: any) {
+    showToast('保存失败: ' + (e.response?.data?.error ?? e.message))
+  }
+}
+
+async function run() {
+  execResult.value = null
+  canvasRef.value?.clearStatus()
+  try {
+    const result = await api.executeGraph({
+      name: flowName.value,
+      description: flowDescription.value,
+      graph: canvasRef.value!.getGraph()
+    })
+    execResult.value = result
+    const statusMap: Record<string, 'success' | 'failed' | 'skipped'> = {}
+    for (const t of result.traces) {
+      statusMap[t.nodeId] = t.status === 'SUCCESS' ? 'success' : t.status === 'FAILED' ? 'failed' : 'skipped'
+    }
+    canvasRef.value?.applyStatus(statusMap)
+    showToast(result.success ? '执行成功' : '执行失败')
+  } catch (e: any) {
+    showToast('执行失败: ' + (e.response?.data?.error ?? e.message))
+  }
+}
+
+async function removeFlow() {
+  if (!currentFlowId.value || !confirm('确定删除该流程？')) return
+  await api.deleteFlow(currentFlowId.value)
+  await loadFlows()
+  newFlow()
+}
+
+function showToast(msg: string) {
+  toast.value = msg
+  setTimeout(() => (toast.value = ''), 2500)
+}
+</script>
+
+<template>
+  <div class="app">
+    <header class="topbar">
+      <div class="logo">⚡ Flow 计算引擎</div>
+      <select v-model="currentFlowId" class="flow-select" @change="onFlowSelectChange">
+        <option value="" disabled>选择已有流程…</option>
+        <option v-for="f in flows" :key="f.id" :value="f.id">{{ f.name }}</option>
+      </select>
+      <input v-model="flowName" class="flow-name" placeholder="流程名称" />
+      <input v-model="flowDescription" class="flow-desc" placeholder="流程描述（可选）" />
+      <div class="actions">
+        <button @click="newFlow">新建</button>
+        <button class="primary" @click="save">保存</button>
+        <button class="success" @click="run">▶ 运行</button>
+        <button v-if="currentFlowId" class="danger-ghost" @click="removeFlow">删除</button>
+      </div>
+    </header>
+
+    <div class="main">
+      <NodePalette :definitions="definitions" @add="def => canvasRef?.addNode(def)" />
+      <FlowCanvas
+        ref="canvasRef"
+        @node-select="node => (selectedNode = node)"
+      />
+      <NodeConfigPanel
+        v-if="selectedNode"
+        :node="selectedNode"
+        :def-map="defById"
+        @delete-node="id => canvasRef?.deleteNode(id)"
+      />
+      <ExecutionPanel v-if="execResult" :result="execResult" @close="execResult = null" />
+    </div>
+
+    <div v-if="toast" class="toast">{{ toast }}</div>
+  </div>
+</template>
+
+<style scoped>
+.app { height: 100vh; display: flex; flex-direction: column; background: #f8fafc; }
+.topbar {
+  height: 56px; flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; background: #fff; border-bottom: 1px solid #e2e8f0; z-index: 10;
+}
+.logo { font-weight: 700; margin-right: 8px; white-space: nowrap; }
+.flow-select { width: 190px; }
+.flow-name { width: 170px; }
+.flow-desc { width: 210px; }
+.actions { margin-left: auto; display: flex; gap: 8px; }
+.main { flex: 1; display: flex; min-height: 0; position: relative; }
+.toast {
+  position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+  background: #111827; color: #fff; padding: 8px 18px; border-radius: 6px;
+  font-size: 13px; z-index: 100;
+}
+</style>
+```
+
+### src/components/NodePalette.vue
+
+```vue
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { NodeDefinition } from '../types'
+
+const props = defineProps<{ definitions: NodeDefinition[] }>()
+const emit = defineEmits<{ (e: 'add', def: NodeDefinition): void }>()
+
+const groupNames: Record<string, string> = { INPUT: '输入节点', COMPUTE: '计算节点', OUTPUT: '输出节点' }
+const groups = computed(() =>
+  (['INPUT', 'COMPUTE', 'OUTPUT'] as const).map(type => ({
+    type,
+    name: groupNames[type],
+    items: props.definitions.filter(d => d.type === type)
+  }))
+)
+
+function onDragStart(event: DragEvent, def: NodeDefinition) {
+  if (!event.dataTransfer) return
+  event.dataTransfer.setData('application/flow-node', JSON.stringify(def))
+  event.dataTransfer.effectAllowed = 'move'
+}
+</script>
+
+<template>
+  <aside class="palette">
+    <h3>节点库</h3>
+    <p class="hint">拖拽到画布，或点击添加</p>
+    <div v-for="g in groups" :key="g.type">
+      <div class="group-title">{{ g.name }}（{{ g.items.length }}）</div>
+      <div
+        v-for="def in g.items"
+        :key="def.id"
+        class="palette-item"
+        :class="g.type.toLowerCase()"
+        draggable="true"
+        :title="def.description"
+        @dragstart="onDragStart($event, def)"
+        @click="emit('add', def)"
+      >
+        <span class="dot"></span>{{ def.name }}
+      </div>
+    </div>
+  </aside>
+</template>
+
+<style scoped>
+.palette {
+  width: 230px; flex: none; background: #fff; border-right: 1px solid #e2e8f0;
+  padding: 12px; overflow-y: auto;
+}
+.palette h3 { font-size: 14px; }
+.hint { font-size: 11px; color: #94a3b8; margin: 4px 0 8px; }
+.group-title { font-size: 12px; color: #64748b; margin: 14px 0 6px; font-weight: 600; }
+.palette-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+  margin-bottom: 6px; cursor: grab; font-size: 13px; color: #334155; user-select: none;
+}
+.palette-item:hover { border-color: #94a3b8; background: #f1f5f9; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.palette-item.input .dot { background: #3b82f6; }
+.palette-item.compute .dot { background: #8b5cf6; }
+.palette-item.output .dot { background: #10b981; }
+</style>
+```
+
+### src/components/FlowCanvas.vue
+
+```vue
+<script setup lang="ts">
+import { nextTick } from 'vue'
+import { VueFlow, useVueFlow, type Connection, type GraphNode } from '@vue-flow/core'
+import { Background } from '@vue-flow/background'
+import { Controls } from '@vue-flow/controls'
+import FlowNode from './FlowNode.vue'
+import type { FlowGraph, FlowNodeData, NodeDefinition } from '../types'
+
+const emit = defineEmits<{ (e: 'node-select', node: GraphNode | null): void }>()
+
+const nodeTypes = { 'flow-node': FlowNode }
+
+const {
+  addNodes, addEdges, setNodes, setEdges, removeNodes,
+  getNodes, getEdges, screenToFlowCoordinate, fitView
+} = useVueFlow()
+
+let seq = 0
+
+/** 从节点定义创建画布节点 */
+function addNode(def: NodeDefinition, at?: { x: number; y: number }) {
+  const id = `n_${Date.now()}_${seq++}`
+  const config: Record<string, any> = {}
+  def.fields?.forEach(f => {
+    config[f.key] = f.defaultValue ?? ''
+  })
+  const data: FlowNodeData = {
+    defId: def.id,
+    nodeType: def.type,
+    defName: def.name,
+    name: def.name,
+    description: def.description,
+    config
+  }
+  addNodes({
+    id,
+    type: 'flow-node',
+    position: at ?? { x: 220 + (seq % 6) * 36, y: 140 + (seq % 6) * 36 },
+    data
+  })
+}
+
+function onDrop(event: DragEvent) {
+  const raw = event.dataTransfer?.getData('application/flow-node')
+  if (!raw) return
+  const def: NodeDefinition = JSON.parse(raw)
+  const position = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
+  addNode(def, position)
+}
+
+function onConnect(conn: Connection) {
+  const dup = getEdges.value.some(e => e.source === conn.source && e.target === conn.target)
+  if (dup || !conn.source || !conn.target) return
+  addEdges({
+    id: `e_${conn.source}_${conn.target}_${Date.now()}`,
+    source: conn.source,
+    target: conn.target,
+    type: 'smoothstep'
+  })
+}
+
+function onSelectionChange(params: { nodes: GraphNode[] }) {
+  emit('node-select', params.nodes.length ? params.nodes[0] : null)
+}
+
+/** 序列化当前画布 */
+function getGraph(): FlowGraph {
+  return {
+    nodes: getNodes.value.map(n => ({
+      id: n.id,
+      type: n.type,
+      position: { x: n.position.x, y: n.position.y },
+      data: n.data
+    })),
+    edges: getEdges.value.map(e => ({ id: e.id, source: e.source, target: e.target }))
+  }
+}
+
+function loadGraph(graph: FlowGraph) {
+  setNodes((graph?.nodes ?? []).map(n => ({
+    ...n,
+    type: 'flow-node',
+    data: { ...n.data, config: n.data?.config ?? {} }
+  })))
+  setEdges((graph?.edges ?? []).map(e => ({ ...e, type: 'smoothstep' })))
+  nextTick(() => fitView({ padding: 0.2 }))
+}
+
+function clear() {
+  setNodes([])
+  setEdges([])
+}
+
+function applyStatus(map: Record<string, 'success' | 'failed' | 'skipped'>) {
+  getNodes.value.forEach(n => {
+    ;(n.data as FlowNodeData).status = map[n.id]
+  })
+}
+
+function clearStatus() {
+  getNodes.value.forEach(n => {
+    delete (n.data as FlowNodeData).status
+  })
+}
+
+function deleteNode(id: string) {
+  removeNodes(id)
+}
+
+defineExpose({ addNode, getGraph, loadGraph, clear, applyStatus, clearStatus, deleteNode })
+</script>
+
+<template>
+  <div class="canvas-wrap" @drop="onDrop" @dragover.prevent>
+    <VueFlow
+      :node-types="nodeTypes"
+      :default-edge-options="{ type: 'smoothstep' }"
+      :min-zoom="0.2"
+      :max-zoom="2"
+      @connect="onConnect"
+      @selection-change="onSelectionChange"
+    >
+      <Background :gap="20" />
+      <Controls />
+    </VueFlow>
+    <div class="tip">从左侧拖入节点 · 从节点右侧圆点拖线到另一节点左侧圆点连线 · 选中后可在右侧改配置 · Backspace 删除</div>
+  </div>
+</template>
+
+<style scoped>
+.canvas-wrap { flex: 1; position: relative; min-width: 0; }
+.canvas-wrap :deep(.vue-flow) { height: 100%; background: #f8fafc; }
+.tip {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; color: #94a3b8; background: rgba(255, 255, 255, 0.92);
+  padding: 4px 14px; border-radius: 999px; border: 1px solid #e2e8f0;
+  z-index: 5; pointer-events: none; white-space: nowrap;
+}
+</style>
+```
+
+### src/components/FlowNode.vue
+
+```vue
+<script setup lang="ts">
+import { Handle, Position } from '@vue-flow/core'
+import type { FlowNodeData } from '../types'
+
+defineProps<{ id: string; data: FlowNodeData; selected?: boolean }>()
+
+const typeMeta: Record<string, { label: string; color: string }> = {
+  INPUT: { label: '输入', color: '#3b82f6' },
+  COMPUTE: { label: '计算', color: '#8b5cf6' },
+  OUTPUT: { label: '输出', color: '#10b981' }
+}
+</script>
+
+<template>
+  <div class="flow-node" :class="[data.nodeType?.toLowerCase(), data.status, { 'is-selected': selected }]">
+    <Handle v-if="data.nodeType !== 'INPUT'" type="target" :position="Position.Left" />
+    <div class="fn-header">
+      <span class="fn-badge" :style="{ background: typeMeta[data.nodeType]?.color }">
+        {{ typeMeta[data.nodeType]?.label }}
+      </span>
+      <span class="fn-name">{{ data.name }}</span>
+    </div>
+    <div class="fn-def">{{ data.defName }}</div>
+    <div v-if="data.description" class="fn-desc">{{ data.description }}</div>
+    <Handle v-if="data.nodeType !== 'OUTPUT'" type="source" :position="Position.Right" />
+  </div>
+</template>
+
+<style scoped>
+.flow-node {
+  min-width: 180px; max-width: 240px; background: #fff;
+  border: 2px solid #cbd5e1; border-radius: 10px; padding: 10px 12px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); font-size: 12px;
+}
+.flow-node.is-selected { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15); }
+.flow-node.success { border-color: #10b981; }
+.flow-node.failed { border-color: #ef4444; }
+.flow-node.skipped { border-color: #9ca3af; border-style: dashed; opacity: 0.7; }
+.fn-header { display: flex; align-items: center; gap: 6px; }
+.fn-badge { color: #fff; font-size: 10px; padding: 1px 7px; border-radius: 8px; flex: none; }
+.fn-name { font-weight: 600; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fn-def { color: #6b7280; font-size: 11px; margin-top: 5px; }
+.fn-desc { color: #9ca3af; font-size: 11px; margin-top: 2px; word-break: break-all; }
+:deep(.vue-flow__handle) {
+  width: 11px; height: 11px; background: #64748b; border: 2px solid #fff;
+}
+</style>
+```
+
+### src/components/NodeConfigPanel.vue
+
+```vue
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import type { GraphNode } from '@vue-flow/core'
+import type { FlowNodeData, NodeDefinition } from '../types'
+
+const props = defineProps<{ node: GraphNode; defMap: Map<string, NodeDefinition> }>()
+const emit = defineEmits<{ (e: 'delete-node', id: string): void }>()
+
+const data = computed<FlowNodeData>(() => props.node.data as FlowNodeData)
+const def = computed(() => props.defMap.get(data.value.defId))
+
+// 无声明字段时，用 JSON 文本编辑兜底
+const configJson = ref('{}')
+const jsonError = ref(false)
+
+watch(() => props.node.id, syncJson, { immediate: true })
+
+function syncJson() {
+  configJson.value = JSON.stringify(data.value.config ?? {}, null, 2)
+  jsonError.value = false
+}
+
+function applyJson() {
+  try {
+    data.value.config = JSON.parse(configJson.value)
+    jsonError.value = false
+  } catch {
+    jsonError.value = true
+  }
+}
+
+function setField(key: string, value: any, type: string) {
+  data.value.config[key] = type === 'number' ? Number(value) : value
+}
+</script>
+
+<template>
+  <aside class="config-panel">
+    <h3>节点配置</h3>
+
+    <label>名称</label>
+    <input v-model="data.name" placeholder="节点名称" />
+
+    <label>描述</label>
+    <textarea v-model="data.description" rows="2" placeholder="节点描述"></textarea>
+
+    <div class="def-info">
+      节点定义：{{ def?.name ?? data.defId }}<br />
+      <span class="muted">{{ def?.description }}</span>
+    </div>
+
+    <!-- 注解里声明了 fields：自动渲染表单 -->
+    <template v-if="def?.fields?.length">
+      <div v-for="f in def.fields" :key="f.key" class="field">
+        <label>{{ f.label || f.key }}</label>
+        <textarea
+          v-if="f.type === 'textarea'"
+          :value="data.config[f.key] ?? ''"
+          rows="8"
+          class="mono"
+          @input="setField(f.key, ($event.target as HTMLTextAreaElement).value, f.type)"
+        ></textarea>
+        <input
+          v-else
+          :type="f.type === 'number' ? 'number' : 'text'"
+          :value="data.config[f.key] ?? ''"
+          @input="setField(f.key, ($event.target as HTMLInputElement).value, f.type)"
+        />
+      </div>
+    </template>
+
+    <!-- 没有声明 fields：JSON 编辑兜底 -->
+    <template v-else>
+      <label>参数（JSON）</label>
+      <textarea v-model="configJson" rows="8" class="mono" @change="applyJson"></textarea>
+      <div v-if="jsonError" class="err">JSON 格式不正确</div>
+    </template>
+
+    <button class="danger" @click="emit('delete-node', node.id)">删除节点</button>
+  </aside>
+</template>
+
+<style scoped>
+.config-panel {
+  width: 300px; flex: none; background: #fff; border-left: 1px solid #e2e8f0;
+  padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+}
+.config-panel h3 { font-size: 14px; }
+label { font-size: 12px; color: #64748b; margin-top: 6px; }
+.def-info { font-size: 12px; color: #334155; background: #f8fafc; border-radius: 6px; padding: 8px; }
+.muted { color: #94a3b8; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.err { color: #dc2626; font-size: 12px; }
+button.danger { margin-top: 14px; color: #dc2626; border-color: #fca5a5; }
+button.danger:hover { background: #fef2f2; }
+</style>
+```
+
+### src/components/ExecutionPanel.vue
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import type { ExecutionResult } from '../types'
+
+defineProps<{ result: ExecutionResult }>()
+const emit = defineEmits<{ (e: 'close'): void }>()
+const active = ref('')
+
+function pretty(v: any) {
+  if (v === null || v === undefined) return '（空）'
+  if (typeof v === 'string') return v
+  try { return JSON.stringify(v, null, 2) } catch { return String(v) }
+}
+</script>
+
+<template>
+  <div class="exec-panel">
+    <div class="exec-header">
+      <span :class="result.success ? 'ok' : 'fail'">
+        {{ result.success ? '✓ 执行成功' : '✗ 执行失败' }}
+      </span>
+      <span v-if="result.error" class="muted">{{ result.error }}</span>
+      <span class="muted">总耗时 {{ result.durationMs }} ms</span>
+      <button class="close" @click="emit('close')">关闭</button>
+    </div>
+    <div class="exec-body">
+      <div class="traces">
+        <div
+          v-for="t in result.traces"
+          :key="t.nodeId"
+          class="trace"
+          :class="t.status.toLowerCase()"
+          @click="active = active === t.nodeId ? '' : t.nodeId"
+        >
+          <div class="trace-head">
+            <b>{{ t.nodeName }}</b>
+            <span class="muted">{{ t.defName }} · {{ t.status }} · {{ t.durationMs }}ms</span>
+          </div>
+          <pre v-if="active === t.nodeId">{{ t.error ?? pretty(t.output) }}</pre>
+        </div>
+      </div>
+      <div class="outputs">
+        <h4>最终输出</h4>
+        <pre>{{ pretty(result.outputs) }}</pre>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.exec-panel {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 300px;
+  background: #fff; border-top: 1px solid #e2e8f0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+  display: flex; flex-direction: column; z-index: 20;
+}
+.exec-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px; border-bottom: 1px solid #f1f5f9; font-size: 13px;
+}
+.ok { color: #059669; font-weight: 700; }
+.fail { color: #dc2626; font-weight: 700; }
+.muted { color: #94a3b8; }
+.close { margin-left: auto; }
+.exec-body { flex: 1; display: flex; min-height: 0; }
+.traces { flex: 1.2; overflow-y: auto; padding: 10px 12px; border-right: 1px solid #f1f5f9; }
+.trace {
+  border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px;
+  margin-bottom: 8px; font-size: 12px; cursor: pointer;
+}
+.trace-head { display: flex; justify-content: space-between; gap: 8px; }
+.trace.success { border-left: 4px solid #10b981; }
+.trace.failed { border-left: 4px solid #ef4444; }
+.trace.skipped { border-left: 4px solid #94a3b8; opacity: 0.8; }
+.trace pre {
+  margin-top: 8px; background: #0f172a; color: #e2e8f0; padding: 8px;
+  border-radius: 6px; max-height: 140px; overflow: auto;
+  white-space: pre-wrap; word-break: break-all;
+}
+.outputs { flex: 1; overflow: auto; padding: 10px 12px; }
+.outputs h4 { font-size: 13px; margin-bottom: 8px; }
+.outputs pre {
+  background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px;
+  border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px;
+}
+</style>
+```
+
+---
+
+## 四、运行步骤
+
+```bash
+# 1. 后端（需 JDK 17+、Maven）
+cd flow-engine-backend
+mvn spring-boot:run        # 启动在 :8080
+
+# 2. 前端（需 Node 18+）
+cd flow-engine-ui
+npm install
+npm run dev                # 打开 http://localhost:5173
+```
+
+启动后会自动加载种子流程「示例：订单金额汇总」（JSON输入 → 提取items → 提取amount → 求和，并与常量"运费"汇聚 → JSON输出），直接点 **▶ 运行** 就能看到每个节点的执行状态和结果。
+
+---
+
+## 五、如何把你现有的方法接入成节点
+
+这是这个方案最核心的部分——**在现有方法上加一个注解即可**：
+
+```java
+@Service
+public class RiskRules {
+
+    @FlowNode(
+        name = "风控评分",
+        category = "风控",
+        description = "根据订单数据计算风控分",
+        fields = @ConfigField(key = "threshold", label = "阈值",
+                type = ConfigField.FieldType.NUMBER, defaultValue = "80")
+    )
+    public Object score(List<Object> inputs, Map<String, Object> config) {
+        double threshold = Double.parseDouble(String.valueOf(config.get("threshold")));
+        // ... 你现有的计算逻辑，原封不动
+        return result;
+    }
+}
+```
+
+重启后端，左侧节点库自动出现「风控评分」，画布上可配置阈值参数。规则回顾：
+
+- 参数里写 `Map` → 收到画布上配置的参数
+- 参数里写 `List` → 收到所有上游节点的输出
+- 注解的 `fields` → 前端自动渲染配置表单，不用写一行前端代码
+- 节点 id 规则为 `beanName.方法名`，需要改名可用 `@Component("xxx")`
+
+---
+
+## 六、下一步扩展建议
+
+1. **持久化**：把 `FlowRepository` 换成 JPA + MySQL，`FlowGraph` 存 JSON 字段即可，其他代码不动
+2. **更多输入/输出**：Excel、HTTP、DB 输入就是再加几个 `@FlowNode(type = INPUT)` 方法，`fields` 里声明连接参数
+3. **多输出端口**：目前计算节点是单逻辑输出；如需"一个方法返回多路结果"，可让方法返回 `Map<String, Object>`，配合给 `@FlowNode` 加 `outputs` 属性、边上加 `sourceHandle` 实现命名端口
+4. **执行历史**：`ExecutionResult` 已含全量 trace，落库即可做历史记录页
+5. **已有 flow 可视化**：写一个导入器，把你现有代码里的链式调用结构转成 `{nodes, edges}` JSON 调 `POST /api/flows`，即可把存量逻辑批量画出来
+
+需要的话，下一步我可以帮你实现数据库持久化版本，或者带命名多输出端口的计算节点。
+
+### USER
+我点击画布上的节点 右侧没有反应，改不了节点配置。
+
+### ASSISTANT
+这个问题八成出在**事件监听方式**上：我原来把 `@selection-change`、`@connect` 挂在 `<VueFlow>` 的模板上，这种"模板转发事件"在 Vue Flow 不同小版本下行为不完全一致，而且 `useVueFlow()` 和 `<VueFlow>` 之间如果 store 没关联上，事件更是完全收不到。
+
+修复思路：**① 给 store 显式指定 id，保证 100% 共享；② 所有事件改用 `useVueFlow()` 返回的 `onNodeClick` / `onSelectionChange` / `onConnect` 直接订阅**（直接挂在 store 事件总线上，最可靠）。
+
+## 1. 整个替换 `src/components/FlowCanvas.vue`
+
+```vue
+<script setup lang="ts">
+import { nextTick } from 'vue'
+import { VueFlow, useVueFlow, type Connection, type GraphNode } from '@vue-flow/core'
+import { Background } from '@vue-flow/background'
+import { Controls } from '@vue-flow/controls'
+import FlowNode from './FlowNode.vue'
+import type { FlowGraph, FlowNodeData, NodeDefinition } from '../types'
+
+const emit = defineEmits<{ (e: 'node-select', node: GraphNode | null): void }>()
+
+const nodeTypes = { 'flow-node': FlowNode }
+
+// ★ 关键 1：显式指定 id，确保 useVueFlow 和 <VueFlow> 用同一个 store
+const {
+  id: flowId,
+  addNodes, addEdges, setNodes, setEdges, removeNodes,
+  getNodes, getEdges, screenToFlowCoordinate, fitView,
+  onNodeClick, onPaneClick, onSelectionChange, onConnect
+} = useVueFlow({ id: 'main-flow' })
+
+// ★ 关键 2：事件全部用 composable 订阅，不依赖模板事件转发
+onNodeClick(({ node }) => {
+  emit('node-select', node)
+})
+
+onPaneClick(() => {
+  emit('node-select', null)   // 点空白处关闭面板
+})
+
+onSelectionChange(({ nodes }) => {
+  if (!nodes.length) emit('node-select', null)   // 取消选中时关闭面板
+})
+
+onConnect((conn: Connection) => {
+  if (!conn.source || !conn.target) return
+  const dup = getEdges.value.some(e => e.source === conn.source && e.target === conn.target)
+  if (dup) return
+  addEdges({
+    id: `e_${conn.source}_${conn.target}_${Date.now()}`,
+    source: conn.source,
+    target: conn.target,
+    type: 'smoothstep'
+  })
+})
+
+let seq = 0
+
+function addNode(def: NodeDefinition, at?: { x: number; y: number }) {
+  const id = `n_${Date.now()}_${seq++}`
+  const config: Record<string, any> = {}
+  def.fields?.forEach(f => {
+    config[f.key] = f.defaultValue ?? ''
+  })
+  const data: FlowNodeData = {
+    defId: def.id,
+    nodeType: def.type,
+    defName: def.name,
+    name: def.name,
+    description: def.description,
+    config
+  }
+  addNodes({
+    id,
+    type: 'flow-node',
+    position: at ?? { x: 220 + (seq % 6) * 36, y: 140 + (seq % 6) * 36 },
+    data
+  })
+}
+
+function onDrop(event: DragEvent) {
+  const raw = event.dataTransfer?.getData('application/flow-node')
+  if (!raw) return
+  const def: NodeDefinition = JSON.parse(raw)
+  const position = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
+  addNode(def, position)
+}
+
+function getGraph(): FlowGraph {
+  return {
+    nodes: getNodes.value.map(n => ({
+      id: n.id,
+      type: n.type,
+      position: { x: n.position.x, y: n.position.y },
+      data: n.data
+    })),
+    edges: getEdges.value.map(e => ({ id: e.id, source: e.source, target: e.target }))
+  }
+}
+
+function loadGraph(graph: FlowGraph) {
+  setNodes((graph?.nodes ?? []).map(n => ({
+    ...n,
+    type: 'flow-node',
+    data: { ...n.data, config: n.data?.config ?? {} }
+  })))
+  setEdges((graph?.edges ?? []).map(e => ({ ...e, type: 'smoothstep' })))
+  nextTick(() => fitView({ padding: 0.2 }))
+}
+
+function clear() {
+  setNodes([])
+  setEdges([])
+  emit('node-select', null)
+}
+
+function applyStatus(map: Record<string, 'success' | 'failed' | 'skipped'>) {
+  getNodes.value.forEach(n => {
+    ;(n.data as FlowNodeData).status = map[n.id]
+  })
+}
+
+function clearStatus() {
+  getNodes.value.forEach(n => {
+    delete (n.data as FlowNodeData).status
+  })
+}
+
+function deleteNode(id: string) {
+  removeNodes(id)
+  emit('node-select', null)
+}
+
+defineExpose({ addNode, getGraph, loadGraph, clear, applyStatus, clearStatus, deleteNode })
+</script>
+
+<template>
+  <div class="canvas-wrap" @drop="onDrop" @dragover.prevent>
+    <VueFlow
+      :id="flowId"
+      :node-types="nodeTypes"
+      :default-edge-options="{ type: 'smoothstep' }"
+      :min-zoom="0.2"
+      :max-zoom="2"
+    >
+      <Background :gap="20" />
+      <Controls />
+    </VueFlow>
+    <div class="tip">从左侧拖入节点 · 从节点右侧圆点拖线到另一节点左侧圆点连线 · 选中后可在右侧改配置 · Backspace 删除</div>
+  </div>
+</template>
+
+<style scoped>
+.canvas-wrap { flex: 1; position: relative; min-width: 0; }
+.canvas-wrap :deep(.vue-flow) { height: 100%; background: #f8fafc; }
+.tip {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; color: #94a3b8; background: rgba(255, 255, 255, 0.92);
+  padding: 4px 14px; border-radius: 999px; border: 1px solid #e2e8f0;
+  z-index: 5; pointer-events: none; white-space: nowrap;
+}
+</style>
+```
+
+## 2. `App.vue` 改两处
+
+给配置面板加 `:key`，切换节点时强制重建面板，避免上一个节点的本地状态残留：
+
+```vue
+<NodeConfigPanel
+  v-if="selectedNode"
+  :key="selectedNode.id"
+  :node="selectedNode"
+  :def-map="defById"
+  @delete-node="id => canvasRef?.deleteNode(id)"
+/>
+```
+
+## 3. `NodeConfigPanel.vue` 里加一行防御
+
+`data` 计算属性里保证 `config` 一定存在（防止个别节点 config 为 undefined 导致表单写不进去）：
+
+```ts
+const data = computed<FlowNodeData>(() => {
+  const d = props.node.data as FlowNodeData
+  if (!d.config) d.config = {}
+  return d
+})
+```
+
+## 验证
+
+1. 重启前端，点击画布节点，右侧应立刻出现「节点配置」面板
+2. 如果还是没反应，按 F12 打开 Console，点一下节点看有没有报错——把报错发我
+3. 顺便确认一下装的版本：`npm ls @vue-flow/core`，应该是 1.4x。如果是 2.x，API 有变化，告诉我版本号我再帮你适配
+
+改完后：改名称/描述会实时反映到画布节点上；改完点「保存」再刷新页面，配置应该持久保留。有问题把 Console 截图发我。
